@@ -1,0 +1,20 @@
+{
+  "name": "whatsapp-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp automation bot with interactive reply buttons",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "admin": "node admin/server.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "axios": "^1.20.0",
+    "dotenv": "^18.0.6",
+    "express": "^4.22.3",
+    "multer": "^2.4.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}

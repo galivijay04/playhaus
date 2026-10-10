@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Playhaus — Bot Admin Panel</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar">
+    <div class="logo">
+      <span class="logo-icon">🎭</span>
+      <span class="logo-text">Playhaus</span>
+    </div>
+    <nav>
+      <a href="#" class="nav-item active" data-tab="welcome"><span>💬</span> Welcome</a>
+      <a href="#" class="nav-item" data-tab="banner"><span>🖼️</span> Banner</a>
+      <a href="#" class="nav-item" data-tab="flow"><span>⚡</span> Flow Settings</a>
+      <a href="#" class="nav-item" data-tab="products"><span>📦</span> Products</a>
+      <a href="#" class="nav-item" data-tab="flowjson"><span>📋</span> Flow JSON</a>
+    </nav>
+    <div class="sidebar-footer">Bot Admin v2.0</div>
+  </aside>
+
+  <!-- ── Main ── -->
+  <main class="main">
+    <header class="topbar">
+      <h1 id="page-title">Welcome Message</h1>
+      <div class="status-badge" id="status-badge">● Live</div>
+    </header>
+    <div class="toast" id="toast"></div>
+
+    <!-- ══ TAB: Welcome ══ -->
+    <section class="tab-content active" id="tab-welcome">
+      <div class="card">
+        <h2>Welcome Message</h2>
+        <p class="hint">First message users receive. Shown with banner image and Choose Service button.</p>
+        <div class="form-group">
+          <label>Message Text</label>
+          <textarea id="welcomeMessage" rows="6" placeholder="Type your welcome message..."></textarea>
+        </div>
+        <button class="btn btn-primary" onclick="saveWelcome()">💾 Save Message</button>
+      </div>
+      <div class="card preview-card">
+        <h2>📱 Live Preview</h2>
+        <p class="hint">Banner + message + CTA button — all in one WhatsApp message.</p>
+        <div class="phone-mock">
+          <div class="phone-screen">
+            <div class="chat-bubble combined-bubble">
+              <div class="combined-banner" id="preview-banner-wrap" style="display:none">
+                <img id="preview-banner-img" src="" alt="Banner" />
+              </div>
+              <div class="combined-text">
+                <p id="preview-message" style="white-space:pre-wrap"></p>
+              </div>
+              <div class="combined-cta">
+                <span id="preview-cta-btn">Choose a Service</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ TAB: Banner ══ -->
+    <section class="tab-content" id="tab-banner">
+      <div class="card">
+        <h2>Welcome Banner Image</h2>
+        <p class="hint">Shown as the header image of the welcome message. Leave empty for text-only header.</p>
+        <div id="current-banner-wrap" style="display:none; margin-bottom:20px;">
+          <label>Current Banner</label>
+          <div class="banner-preview-box">
+            <img id="current-banner-img" src="" alt="Current Banner" />
+            <button class="btn btn-danger btn-sm" onclick="clearBanner()">🗑 Remove</button>
+          </div>
+        </div>
+        <div class="tabs-inner">
+          <button class="tab-btn active" onclick="switchBannerTab('upload', this)">📤 Upload Image</button>
+          <button class="tab-btn" onclick="switchBannerTab('url', this)">🔗 Paste URL</button>
+        </div>
+        <div id="banner-upload" class="banner-tab-panel">
+          <div class="upload-zone" onclick="document.getElementById('bannerFile').click()">
+            <div class="upload-icon">🖼️</div>
+            <p>Click to upload or drag & drop</p>
+            <p class="hint">JPG, PNG, WEBP — max 5MB</p>
+            <input type="file" id="bannerFile" accept="image/*" style="display:none" onchange="uploadBanner(this)" />
+          </div>
+        </div>
+        <div id="banner-url" class="banner-tab-panel" style="display:none">
+          <div class="form-group">
+            <label>Public Image URL</label>
+            <input type="url" id="bannerUrlInput" placeholder="https://example.com/banner.jpg" />
+          </div>
+          <button class="btn btn-primary" onclick="saveBannerUrl()">💾 Set Banner URL</button>
+        </div>
+        <div class="form-group" style="margin-top:20px">
+          <label>Banner Caption (optional)</label>
+          <input type="text" id="welcomeBannerCaption" placeholder="e.g. Welcome to The Playhaus ✨" />
+        </div>
+        <button class="btn btn-primary" onclick="saveCaption()">💾 Save Caption</button>
+      </div>
+    </section>
+
+    <!-- ══ TAB: Flow Settings ══ -->
+    <section class="tab-content" id="tab-flow">
+      <div class="card">
+        <h2>⚡ Flow Message Settings</h2>
+        <p class="hint">Customize the text on the "Choose a Service" card and the replies for each service.</p>
+        <div class="form-group">
+          <label>Flow Body Text</label>
+          <textarea id="flowBodyText" rows="3" placeholder="What would you like to do today?"></textarea>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>CTA Button Label</label>
+            <input type="text" id="flowCtaText" placeholder="Choose a Service" maxlength="20" />
+            <span class="char-hint">Max 20 characters</span>
+          </div>
+          <div class="form-group">
+            <label>Footer Text</label>
+            <input type="text" id="flowFooterText" placeholder="Kheloge Toh Khiloge ✨" />
+          </div>
+        </div>
+        <button class="btn btn-primary" onclick="saveFlowSettings()">💾 Save Flow Settings</button>
+      </div>
+
+      <div class="card">
+        <h2>📨 Service Replies</h2>
+        <p class="hint">What the bot sends after user completes the flow for each service.</p>
+        <div class="form-group">
+          <label>Track Order Reply</label>
+          <textarea id="trackOrderReply" rows="3" placeholder="📦 Track Your Order..."></textarea>
+        </div>
+        <div class="form-group">
+          <label>Customer Support Reply</label>
+          <textarea id="supportReply" rows="3" placeholder="🎧 Customer Support..."></textarea>
+        </div>
+        <button class="btn btn-primary" onclick="saveServiceReplies()">💾 Save Replies</button>
+      </div>
+
+      <div class="card preview-card">
+        <h2>📱 Flow Card Preview</h2>
+        <div class="phone-mock">
+          <div class="phone-screen">
+            <div class="chat-bubble">
+              <strong style="color:#e9edef;font-size:13px">🎮 Playhaus Services</strong>
+              <p id="flow-preview-body" style="margin-top:8px;white-space:pre-wrap"></p>
+              <div style="margin-top:10px">
+                <div class="preview-btn" id="flow-preview-cta">Choose a Service</div>
+              </div>
+              <p style="color:#667681;font-size:11px;margin-top:8px" id="flow-preview-footer"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ TAB: Products ══ -->
+    <section class="tab-content" id="tab-products">
+      <div class="card">
+        <h2>Add New Product</h2>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Product Name *</label>
+            <input type="text" id="prod-name" placeholder="e.g. Snap Magnet" />
+          </div>
+          <div class="form-group">
+            <label>Price *</label>
+            <input type="text" id="prod-price" placeholder="e.g. Rs.999" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Flow ID (unique slug, no spaces)</label>
+          <input type="text" id="prod-flowid" placeholder="e.g. snap_magnet" />
+        </div>
+        <div class="form-group">
+          <label>Description</label>
+          <textarea id="prod-desc" rows="3" placeholder="Describe this product..."></textarea>
+        </div>
+        <div class="form-group">
+          <label>Tags</label>
+          <input type="text" id="prod-tags" placeholder="e.g. Strategy, Ages 5+" />
+        </div>
+        <div class="form-group">
+          <label>Product Image URL</label>
+          <input type="url" id="prod-image" placeholder="https://example.com/image.jpg" />
+        </div>
+        <div class="form-group">
+          <label>Product Page URL</label>
+          <input type="url" id="prod-url" placeholder="https://playhausgames.com/products/..." />
+        </div>
+        <button class="btn btn-primary" onclick="addProduct()">➕ Add Product</button>
+      </div>
+      <div class="card">
+        <h2>All Products <span class="badge" id="product-count">0</span></h2>
+        <p class="hint">After editing products, go to Flow JSON tab → Refresh → copy and republish in Meta.</p>
+        <div id="products-list" class="products-grid">
+          <p class="empty-state">No products yet.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ TAB: Flow JSON ══ -->
+    <section class="tab-content" id="tab-flowjson">
+      <div class="card">
+        <h2>📋 Flow JSON for Meta</h2>
+        <p class="hint">Copy this and paste into <strong>Meta → WhatsApp → Flows → Edit → Save → Publish</strong>.</p>
+        <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+          <button class="btn btn-primary" onclick="loadFlowJson()">🔄 Refresh JSON</button>
+          <button class="btn btn-ghost" onclick="copyFlowJson()">📋 Copy to Clipboard</button>
+          <button class="btn btn-ghost" onclick="regenerateFlow()">⚙️ Regenerate from Products</button>
+        </div>
+        <div id="flow-status" style="margin-bottom:12px;font-size:13px;color:#888"></div>
+        <pre id="flow-json-output" style="background:#111;border:1px solid #2e2e2e;border-radius:8px;padding:16px;font-size:11px;color:#a8d8a8;overflow:auto;max-height:500px;white-space:pre-wrap;word-break:break-word;">Click "Refresh JSON" to load...</pre>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ── Edit Product Modal ── -->
+  <div class="modal-overlay" id="edit-modal" style="display:none">
+    <div class="modal">
+      <h3>Edit Product</h3>
+      <input type="hidden" id="edit-id" />
+      <div class="form-group"><label>Name</label><input type="text" id="edit-name" /></div>
+      <div class="form-group"><label>Price</label><input type="text" id="edit-price" /></div>
+      <div class="form-group"><label>Flow ID</label><input type="text" id="edit-flowid" /></div>
+      <div class="form-group"><label>Description</label><textarea id="edit-desc" rows="3"></textarea></div>
+      <div class="form-group"><label>Tags</label><input type="text" id="edit-tags" /></div>
+      <div class="form-group"><label>Image URL</label><input type="url" id="edit-image" /></div>
+      <div class="form-group"><label>Product URL</label><input type="url" id="edit-url" /></div>
+      <div class="form-group">
+        <label>Status</label>
+        <select id="edit-active"><option value="true">Active</option><option value="false">Inactive</option></select>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-primary" onclick="saveEditProduct()">💾 Save</button>
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

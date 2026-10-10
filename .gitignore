@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Environment variables — contains secrets, NEVER commit
+.env
+
+# Large generated files (base64 images inside — too big for git)
+flow.json
+PASTE-THIS-IN-META.json
+
+# Cloudflared binary
+cloudflared.exe
+
+# Upload files
+admin/uploads/
+
+# OS
+.DS_Store
+Thumbs.db

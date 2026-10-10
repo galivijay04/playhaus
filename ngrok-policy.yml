@@ -1,0 +1,6 @@
+on_http_response:
+  - actions:
+      - type: add-headers
+        config:
+          headers:
+            ngrok-skip-browser-warning: "true"
