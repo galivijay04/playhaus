@@ -1,8 +1,7 @@
 # Dependencies
 node_modules/
 
-# Environment variables — contains secrets, NEVER commit
-.env
+# .env is tracked in this repo
 
 # Large generated files (base64 images inside — too big for git)
 flow.json
