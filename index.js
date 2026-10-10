@@ -188,40 +188,44 @@ async function sendWelcomeWithFlow(to) {
 async function handleFlowResponse(sender, responseData) {
   const service     = responseData?.service;
   const productId   = responseData?.product;
-  const quantity    = responseData?.quantity    || "1";
-  const specialNote = responseData?.special_note || "";
+  const productName = responseData?.product_name;
+  const unitPrice   = responseData?.unit_price   || "999";
+  const quantity    = responseData?.quantity      || "1";
+  const specialNote = responseData?.special_note  || "";
 
   console.log(`🎯 Service: ${service} | Product: ${productId} | Qty: ${quantity}`);
 
-  // ── Place Order with product + quantity ──────────────────────────────────
+  // ── Place Order ────────────────────────────────────────────────────────────
   if (service === "place_order" && productId) {
     const cfg   = getConfig();
     const found = cfg.products.find(
       (p) => (p.flowId === productId || p.id === productId) && p.active
     );
 
+    const name  = found?.name  || productName || productId;
+    const price = parseInt(unitPrice) || 999;
+    const qty   = parseInt(quantity)  || 1;
+    const total = price * qty;
+
+    await sendText(
+      sender,
+      `🎉 *Order Received!*\n\n` +
+      `🎮 *${name}*\n` +
+      `💰 Rs.${price} × ${qty} = *Rs.${total}*\n` +
+      (specialNote ? `📝 Note: ${specialNote}\n` : ``) +
+      `\n✅ Your order has been placed!\n\n` +
+      `Our team will contact you shortly to confirm delivery.\n\n` +
+      `📞 +91 6364936004\n📧 care@playhaus.in`
+    );
+
     if (found) {
-      const total = `Rs.${parseInt(quantity) * 999}`;
-      await sendText(
-        sender,
-        `🎉 *Order Received!*\n\n` +
-        `🎮 Product: *${found.name}*\n` +
-        `💰 Price: ${found.price} × ${quantity} = *${total}*\n` +
-        (specialNote ? `📝 Note: ${specialNote}\n` : "") +
-        `\n✅ Your order has been placed successfully!\n\n` +
-        `Our team will contact you shortly to confirm delivery details.\n\n` +
-        `📞 Questions? Call +91 6364936004\n` +
-        `📧 care@playhaus.in`
-      );
       await new Promise((r) => setTimeout(r, 700));
       await sendProductCard(sender, found);
-    } else {
-      await sendText(sender, `😔 Sorry, that product is currently unavailable. Please try again later!`);
     }
     return;
   }
 
-  // ── Track Order ───────────────────────────────────────────────────────────
+  // ── Track Order ────────────────────────────────────────────────────────────
   if (service === "track_order") {
     await sendText(
       sender,
@@ -230,7 +234,7 @@ async function handleFlowResponse(sender, responseData) {
     return;
   }
 
-  // ── Customer Support ──────────────────────────────────────────────────────
+  // ── Customer Support ───────────────────────────────────────────────────────
   if (service === "customer_support") {
     await sendText(
       sender,
@@ -291,7 +295,8 @@ app.post("/webhook", async (req, res) => {
     await sendWelcomeWithFlow(sender);
 
   } catch (err) {
-    console.error("❌ Error:", err?.response?.data || err.message);
+    console.error("❌ Error:", JSON.stringify(err?.response?.data || err.message, null, 2));
+    console.error("❌ Stack:", err.stack);
   }
 });
 

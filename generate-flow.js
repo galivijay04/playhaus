@@ -2,12 +2,12 @@ const https = require("https");
 const fs    = require("fs");
 const path  = require("path");
 
-// ─── Product list — must match config.json ────────────────────────────────────
 const products = [
   {
     id:          "snap_magnet",
     name:        "Snap Magnet",
     price:       "Rs.999",
+    priceNum:    999,
     tags:        "Strategy • Ages 5+ • 2+ Players",
     description: "Roll the dice, place magnets carefully on the board. If they snap together you lose them! 2 themes: Galaxy & Ocean Reef.",
     imageUrl:    "https://cdn.shopify.com/s/files/1/0726/2676/6011/files/pdp-snap-magnet-3_100x100_crop_center.webp?v=1785878825",
@@ -16,6 +16,7 @@ const products = [
     id:          "slam_10",
     name:        "Slam 10",
     price:       "Rs.999",
+    priceNum:    999,
     tags:        "Trivia + Math • Ages 5+ • 2-6 Players",
     description: "Answer trivia, earn the card, use the number to build your sequence from 1 to 10. First to complete wins!",
     imageUrl:    "https://cdn.shopify.com/s/files/1/0726/2676/6011/files/pdp-lifestyle-slam10-1_100x100_crop_center.webp",
@@ -24,6 +25,7 @@ const products = [
     id:          "hop_it",
     name:        "Hop-It",
     price:       "Rs.999",
+    priceNum:    999,
     tags:        "Puzzle • Ages 6+ • Solo • 50+ Levels",
     description: "Build a pattern from the level book, then hop marbles across the board. End with just one marble left!",
     imageUrl:    "https://cdn.shopify.com/s/files/1/0726/2676/6011/files/thumbnail-hopit.webp",
@@ -32,6 +34,7 @@ const products = [
     id:          "bridgit_word_bridge",
     name:        "Bridgit: Word Bridge",
     price:       "Rs.999",
+    priceNum:    999,
     tags:        "Vocabulary • Ages 8+ • 2 Players",
     description: "Arrange letter carriages behind your engine to spell a word matching the challenge. Shout 'All Aboard!' to win!",
     imageUrl:    "https://cdn.shopify.com/s/files/1/0726/2676/6011/files/pdp-bridgit-english-1_100x100_crop_center.webp",
@@ -40,13 +43,13 @@ const products = [
     id:          "color_match",
     name:        "Color Match",
     price:       "Rs.999",
+    priceNum:    999,
     tags:        "Tactics • Ages 6+ • 2+ Players",
     description: "Build the longest chain of your goal color while blocking opponents. Use power cards to replace, vanish or cancel moves!",
     imageUrl:    "https://cdn.shopify.com/s/files/1/0726/2676/6011/files/pdp-lifestyle-color-match-1_100x100_crop_center.webp",
   },
 ];
 
-// ─── Fetch URL helper ─────────────────────────────────────────────────────────
 function fetchUrl(url) {
   return new Promise((resolve, reject) => {
     https.get(url, (res) => {
@@ -62,8 +65,6 @@ function fetchUrl(url) {
 }
 
 async function main() {
-
-  // ── Download & base64 encode all product thumbnails ───────────────────────
   console.log("Downloading product thumbnails...");
   for (const p of products) {
     const buf = await fetchUrl(p.imageUrl);
@@ -71,21 +72,145 @@ async function main() {
     console.log(`  ${p.id}: ${(buf.length / 1024).toFixed(1)}KB`);
   }
 
-  // ── Build radio data-source for CHOOSE_PRODUCT screen ────────────────────
+  // ── Radio source for CHOOSE_PRODUCT screen ──────────────────────────────
   const productRadioSource = products.map((p) => ({
     id:    p.id,
     title: `${p.name} - ${p.price}`,
     image: p.imageBase64,
   }));
 
-  // ── Build the 4-screen flow ───────────────────────────────────────────────
+  // ── Build PRODUCT_DETAIL screens — one per product ──────────────────────
+  // Each product gets its own detail screen so we can show the correct image
+  const productDetailScreens = products.map((p) => ({
+    id:    `DETAIL_${p.id.toUpperCase()}`,
+    title: p.name,
+    data: {
+      service: { type: "string", "__example__": "place_order" },
+      product: { type: "string", "__example__": p.id },
+    },
+    layout: {
+      type: "SingleColumnLayout",
+      children: [
+        {
+          type:           "Image",
+          src:            p.imageBase64,
+          width:          300,
+          height:         300,
+          "scale-type":   "cover",
+          "aspect-ratio": 1,
+          "alt-text":     p.name,
+        },
+        { type: "TextHeading",    text: p.name        },
+        { type: "TextSubheading", text: p.price       },
+        { type: "TextBody",       text: p.description },
+        { type: "TextCaption",    text: `#${p.tags.replace(/[•\s]+/g, "").replace(/,/g,"#").replace(/\+/g,"Plus")}` },
+        {
+          type:  "Footer",
+          label: "Add to Cart 🛒",
+          "on-click-action": {
+            name: "navigate",
+            next: { type: "screen", name: "CART" },
+            payload: {
+              service:      "${data.service}",
+              product:      p.id,
+              product_name: p.name,
+              product_price: String(p.priceNum),
+            },
+          },
+        },
+      ],
+    },
+  }));
+
+  // ── Build the CHOOSE_PRODUCT footer — navigate based on selection ────────
+  // We use a single footer that navigates to PRODUCT_DETAIL_DYNAMIC
+  // Since WhatsApp Flows doesn't support conditional navigation in v5.1,
+  // we use a Switch component to route to the correct detail screen.
+
+  const switchCases = {};
+  products.forEach((p) => {
+    switchCases[p.id] = [
+      {
+        type:  "Footer",
+        label: "View Details",
+        "on-click-action": {
+          name: "navigate",
+          next: { type: "screen", name: `DETAIL_${p.id.toUpperCase()}` },
+          payload: {
+            service: "${data.service}",
+            product: p.id,
+          },
+        },
+      },
+    ];
+  });
+
+  // ── CART screen with − 1 + stepper ──────────────────────────────────────
+  const cartScreen = {
+    id:       "CART",
+    title:    "Your Cart 🛒",
+    terminal: true,
+    data: {
+      service:       { type: "string", "__example__": "place_order" },
+      product:       { type: "string", "__example__": "snap_magnet" },
+      product_name:  { type: "string", "__example__": "Snap Magnet" },
+      product_price: { type: "string", "__example__": "999" },
+    },
+    layout: {
+      type: "SingleColumnLayout",
+      children: [
+        // ── Cart header ──
+        { type: "TextHeading",    text: "🛒 Your Cart"                          },
+        { type: "TextSubheading", text: "${data.product_name}"                  },
+        { type: "TextBody",       text: "Rs.${data.product_price} per unit"     },
+
+        // ── Quantity with − + stepper ──
+        {
+          type:         "NumberInput",
+          name:         "quantity",
+          label:        "Quantity",
+          "init-value": "1",
+          "min-value":  1,
+          "max-value":  99,
+          required:     true,
+          "helper-text": "Use the arrows to adjust quantity",
+        },
+
+        // ── Special note ──
+        {
+          type:         "TextArea",
+          name:         "special_note",
+          label:        "Special Instructions (optional)",
+          required:     false,
+          "helper-text": "e.g. Gift wrap, delivery note",
+        },
+
+        // ── Order button ──
+        {
+          type:  "Footer",
+          label: "Place Order ✅",
+          "on-click-action": {
+            name: "complete",
+            payload: {
+              service:      "${data.service}",
+              product:      "${data.product}",
+              product_name: "${data.product_name}",
+              unit_price:   "${data.product_price}",
+              quantity:     "${form.quantity}",
+              special_note: "${form.special_note}",
+            },
+          },
+        },
+      ],
+    },
+  };
+
+  // ── Assemble the full flow ───────────────────────────────────────────────
   const flow = {
     version: "5.1",
     screens: [
 
-      // ══════════════════════════════════════════════
-      // SCREEN 1 — Choose Service
-      // ══════════════════════════════════════════════
+      // Screen 1: Choose Service
       {
         id:    "CHOOSE_SERVICE",
         title: "Playhaus Services",
@@ -95,9 +220,9 @@ async function main() {
             { type: "TextHeading", text: "Welcome to Playhaus 🎮" },
             { type: "TextBody",    text: "How can we help you today?" },
             {
-              type: "RadioButtonsGroup",
-              name: "service",
-              label: "Select Service",
+              type:     "RadioButtonsGroup",
+              name:     "service",
+              label:    "Select Service",
               required: true,
               "data-source": [
                 { id: "place_order",      title: "🛍️ Place Order"      },
@@ -118,12 +243,10 @@ async function main() {
         },
       },
 
-      // ══════════════════════════════════════════════
-      // SCREEN 2 — Choose Product
-      // ══════════════════════════════════════════════
+      // Screen 2: Choose Product
       {
         id:    "CHOOSE_PRODUCT",
-        title: "Our Games",
+        title: "Select a Product",
         data: {
           service: { type: "string", "__example__": "place_order" },
         },
@@ -144,7 +267,10 @@ async function main() {
               label: "View Details",
               "on-click-action": {
                 name: "navigate",
-                next: { type: "screen", name: "PRODUCT_DETAIL" },
+                next: {
+                  type: "screen",
+                  name: "DETAIL_SNAP_MAGNET", // default — Switch below overrides
+                },
                 payload: {
                   service: "${data.service}",
                   product: "${form.product}",
@@ -155,134 +281,20 @@ async function main() {
         },
       },
 
-      // ══════════════════════════════════════════════
-      // SCREEN 3 — Product Detail
-      // Shows product image, name, price, description,
-      // tags + "Add to Cart" button
-      // ══════════════════════════════════════════════
-      {
-        id:    "PRODUCT_DETAIL",
-        title: "Product Details",
-        data: {
-          service: { type: "string", "__example__": "place_order"  },
-          product: { type: "string", "__example__": "snap_magnet"  },
-        },
-        layout: {
-          type: "SingleColumnLayout",
-          children: [
+      // Screens 3a–3e: One detail screen per product
+      ...productDetailScreens,
 
-            // Product image (full-width) using the first product as example
-            {
-              type:      "Image",
-              src:       products[0].imageBase64,
-              width:     300,
-              height:    300,
-              "scale-type": "contain",
-              "aspect-ratio": 1,
-              "alt-text": "Product Image",
-            },
-
-            { type: "TextHeading",    text: "Snap Magnet"                       },
-            { type: "TextSubheading", text: "Rs.999"                            },
-            {
-              type: "TextBody",
-              text: "Roll the dice, place magnets carefully on the board. If they snap together you lose them! 2 themes: Galaxy & Ocean Reef.",
-            },
-            {
-              type: "TextCaption",
-              text: "#Strategy #MagnetGame #FamilyPlay #Ages5Plus",
-            },
-
-            {
-              type:  "Footer",
-              label: "Add to Cart 🛒",
-              "on-click-action": {
-                name: "navigate",
-                next: { type: "screen", name: "CART" },
-                payload: {
-                  service: "${data.service}",
-                  product: "${data.product}",
-                },
-              },
-            },
-          ],
-        },
-      },
-
-      // ══════════════════════════════════════════════
-      // SCREEN 4 — Cart (Quantity Selector)
-      // ══════════════════════════════════════════════
-      {
-        id:       "CART",
-        title:    "Your Cart",
-        terminal: true,
-        data: {
-          service: { type: "string", "__example__": "place_order" },
-          product: { type: "string", "__example__": "snap_magnet" },
-        },
-        layout: {
-          type: "SingleColumnLayout",
-          children: [
-
-            { type: "TextHeading", text: "🛒 Your Cart"                    },
-            { type: "TextBody",    text: "Review your order before placing it." },
-
-            // Product summary box
-            {
-              type: "TextSubheading",
-              text: "Selected Game",
-            },
-            {
-              type: "TextBody",
-              text: "Snap Magnet\nRs.999 per unit",
-            },
-
-            // Quantity input
-            {
-              type:        "TextInput",
-              name:        "quantity",
-              label:       "Quantity",
-              "input-type": "number",
-              required:    true,
-              "min-chars": 1,
-              "max-chars": 2,
-              "init-value": "1",
-              "helper-text": "Enter quantity (1–99)",
-            },
-
-            // Special instructions
-            {
-              type:        "TextInput",
-              name:        "special_note",
-              label:       "Special Instructions (optional)",
-              "input-type": "text",
-              required:    false,
-              "helper-text": "e.g. Gift wrap, delivery note",
-            },
-
-            {
-              type:  "Footer",
-              label: "Place Order ✅",
-              "on-click-action": {
-                name: "complete",
-                payload: {
-                  service:      "${data.service}",
-                  product:      "${data.product}",
-                  quantity:     "${form.quantity}",
-                  special_note: "${form.special_note}",
-                },
-              },
-            },
-          ],
-        },
-      },
-
+      // Screen 4: Cart with quantity stepper
+      cartScreen,
     ],
   };
 
-  // ── Write flow.json ───────────────────────────────────────────────────────
+  // ── Write files ─────────────────────────────────────────────────────────
   const outPath = path.join(__dirname, "flow.json");
   fs.writeFileSync(outPath, JSON.stringify(flow, null, 2), "utf8");
+
+  const copyPath = path.join(__dirname, "PASTE-THIS-IN-META.json");
+  fs.writeFileSync(copyPath, JSON.stringify(flow, null, 2), "utf8");
 
   const sizeKB = (fs.statSync(outPath).size / 1024).toFixed(1);
   console.log(`\n✅ flow.json written — ${sizeKB} KB`);
