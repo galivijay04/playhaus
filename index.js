@@ -287,6 +287,157 @@ function generateUpiDetails(order) {
   return { upiId, merchantName, amount, upiUrl, qrCodeUrl };
 }
 
+// ─── Send Order Review Card (Exact Replica of WhatsApp In-Chat Order Details) ───
+async function sendOrderReviewCard(to, order) {
+  const cfg = getConfig();
+  const firstItem = order.items?.[0] || {};
+  let productImageUrl = firstItem.imageUrl;
+  if (!productImageUrl) {
+    const found = cfg.products?.find((p) => p.name === firstItem.name || p.id === firstItem.id || p.flowId === firstItem.id);
+    productImageUrl = found?.imageUrl;
+  }
+  if (!productImageUrl) {
+    productImageUrl = getBannerUrl();
+  }
+
+  const baseUrl = getPublicBaseUrl();
+  const amountNumber = Number(order.totalPayable || 1);
+  const amountFormatted = amountNumber.toFixed(2);
+  const totalPaise = Math.round(amountNumber * 100);
+
+  console.log(`🧾 Sending Order Review card for Order ${order.orderId} to ${to}...`);
+
+  // Attempt 1: Try Native WhatsApp Pay "order_details" Interactive Message
+  const orderItemsPayload = (order.items || []).map((it) => ({
+    retailer_id: it.id || "playhaus_game",
+    name: it.name || "Playhaus Game",
+    amount: {
+      value: Math.round(Number(it.price || 1) * 100),
+      offset: 100,
+    },
+    quantity: it.qty || 1,
+  }));
+
+  const nativeOrderPayload = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "order_details",
+      header: productImageUrl
+        ? { type: "image", image: { link: productImageUrl } }
+        : undefined,
+      body: {
+        text: "Review your items and pay securely via UPI.",
+      },
+      footer: {
+        text: "Powered by WhatsApp Pay",
+      },
+      action: {
+        name: "review_and_pay",
+        parameters: {
+          reference_id: order.orderId,
+          type: "digital-goods",
+          currency: "INR",
+          total_amount: {
+            value: totalPaise,
+            offset: 100,
+          },
+          payment_settings: [
+            {
+              type: "payment_gateway",
+              payment_gateway: {
+                type: "razorpay",
+                configuration_name: process.env.RAZORPAY_CONFIG_NAME || "devine",
+              },
+            },
+          ],
+          order: {
+            status: "pending",
+            items: orderItemsPayload.length > 0 ? orderItemsPayload : [
+              {
+                retailer_id: "snap_magnet",
+                name: "Snap Magnet",
+                amount: { value: totalPaise, offset: 100 },
+                quantity: 1,
+              },
+            ],
+            subtotal: {
+              value: totalPaise,
+              offset: 100,
+            },
+            tax: { value: 0, offset: 100 },
+            shipping: { value: 0, offset: 100 },
+          },
+        },
+      },
+    },
+  };
+
+  try {
+    const res = await axios.post(GRAPH_API_URL, nativeOrderPayload, {
+      headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+    });
+    console.log(`✅ Native order_details sent! Message ID: ${res.data?.messages?.[0]?.id}`);
+    return true;
+  } catch (nativeErr) {
+    const errDetails = nativeErr?.response?.data?.error?.error_data?.details || nativeErr?.response?.data?.error?.message || nativeErr.message;
+    console.log(`ℹ️ Native order_details not supported on this phone number (${errDetails}). Sending exact visual CTA card...`);
+  }
+
+  // Attempt 2: Visual Match CTA Card (renders identical WhatsApp order card with product thumbnail, ORDER #, items, total & Pay now button)
+  const itemsText = (order.items || [])
+    .map((it) => `${it.name}\nQuantity ${it.qty || 1}`)
+    .join("\n\n") || "Snap Magnet\nQuantity 1";
+
+  const cardBody =
+    `ORDER #${order.orderId}\n` +
+    `─────────────────────\n` +
+    `${itemsText}\n\n` +
+    `*Total                                            ₹${amountFormatted}*\n\n` +
+    `🧾 *Order #${order.orderId}*\n` +
+    `Review your items and pay securely via UPI.`;
+
+  const fallbackCardPayload = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "cta_url",
+      header: {
+        type: "image",
+        image: { link: productImageUrl },
+      },
+      body: {
+        text: cardBody,
+      },
+      footer: {
+        text: "Powered by WhatsApp Pay",
+      },
+      action: {
+        name: "cta_url",
+        parameters: {
+          display_text: "Pay now",
+          url: `${baseUrl}/pay/upi/${order.orderId}`,
+        },
+      },
+    },
+  };
+
+  try {
+    const res2 = await axios.post(GRAPH_API_URL, fallbackCardPayload, {
+      headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+    });
+    console.log(`✅ Order review card sent! Message ID: ${res2.data?.messages?.[0]?.id}`);
+    return true;
+  } catch (cardErr) {
+    console.error("❌ sendOrderReviewCard FAILED:", JSON.stringify(cardErr?.response?.data || cardErr.message, null, 2));
+    return false;
+  }
+}
+
 // ─── Send Online UPI QR Code Image Message with Direct App Links ──────────────
 async function sendOnlinePaymentQR(to, order) {
   const { upiId, merchantName, amount, qrCodeUrl } = generateUpiDetails(order);
@@ -764,8 +915,8 @@ app.post("/webhook", async (req, res) => {
         let existingOrder = userOrders[sender];
         if (!existingOrder) {
           const cfg = getConfig();
-          const p = cfg.products?.[0] || { name: "Snap Magnet", price: "Rs.1" };
-          const price = parseInt(p.price?.replace(/[^\d]/g, "")) || 1;
+          const p = cfg.products?.[0] || { name: "Snap Magnet", price: "Rs.1", imageUrl: "https://cdn.shopify.com/s/files/1/0726/2676/6011/files/pdp-snap-magnet-3.webp?v=1785878825" };
+          const price = 1;
           const delivery = parseInt(process.env.DELIVERY_FEE || "0");
           const d = new Date();
           d.setDate(d.getDate() + 3);
@@ -777,10 +928,10 @@ app.post("/webhook", async (req, res) => {
           });
           existingOrder = {
             orderId: `PH-B2C-${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
-            items: [{ name: p.name, price, qty: 1 }],
-            itemsTotal: price,
+            items: [{ name: p.name, price: 1, qty: 1, imageUrl: p.imageUrl, id: p.flowId || p.id }],
+            itemsTotal: 1,
             deliveryFee: delivery,
-            totalPayable: price + delivery,
+            totalPayable: 1 + delivery,
             expectedDelivery,
             isPaid: false,
             step: "AWAITING_PAYMENT",
@@ -794,7 +945,10 @@ app.post("/webhook", async (req, res) => {
           existingOrder.step = "AWAITING_PAYMENT_VERIFICATION";
           existingOrder.isPaid = false;
 
-          // Send Razorpay UPI QR code image with direct UPI app links (GPay, PhonePe, Paytm, etc.)
+          // 1. Send Order Review Card first (exact match to reference screenshot)
+          await sendOrderReviewCard(sender, existingOrder);
+
+          // 2. Send Razorpay UPI QR code image with direct UPI app links (GPay, PhonePe, Paytm, etc.)
           await sendOnlinePaymentQR(sender, existingOrder);
           return;
         } else {
@@ -872,6 +1026,7 @@ app.post("/webhook", async (req, res) => {
           (p) => p.flowId === item.product_retailer_id || p.id === item.product_retailer_id
         );
         const name = found?.name || item.product_retailer_id;
+        const imageUrl = found?.imageUrl || "";
         const catalogPrice = parseInt(found?.price?.replace(/[^\d]/g, "")) || 1;
         let price = catalogPrice;
         if (typeof item.item_price === "number") {
@@ -884,12 +1039,14 @@ app.post("/webhook", async (req, res) => {
         // Ensure sample products configured at 1 Rupee are strictly 1 Rupee
         if (catalogPrice === 1) {
           price = 1;
-        }        const qty = item.quantity || 1;
+        }
+        const qty = item.quantity || 1;
         const lineTotal = price * qty;
         itemsTotal += lineTotal;
         return {
           id: item.product_retailer_id,
           name,
+          imageUrl,
           price,
           qty,
           lineTotal,
@@ -945,6 +1102,7 @@ app.post("/webhook", async (req, res) => {
           existingOrder.paymentMethod = "Online (UPI - Razorpay)";
           existingOrder.step = "AWAITING_PAYMENT_VERIFICATION";
           existingOrder.isPaid = false;
+          await sendOrderReviewCard(sender, existingOrder);
           await sendOnlinePaymentQR(sender, existingOrder);
           return;
         }
