@@ -250,19 +250,25 @@ async function sendCatalog(to, productIds = null) {
   }
 }
 
-// ─── Get Public Order Banner URL ─────────────────────────────────────────────
-function getBannerUrl() {
-  const cfg = getConfig();
-  if (cfg.welcomeBannerUrl && cfg.welcomeBannerUrl.startsWith("http")) {
-    return cfg.welcomeBannerUrl;
-  }
+// ─── Get Public Base URL ──────────────────────────────────────────────────────
+function getPublicBaseUrl() {
   let baseUrl = "https://playhaus.onrender.com";
   if (process.env.PUBLIC_URL && process.env.PUBLIC_URL.startsWith("http") && !process.env.PUBLIC_URL.includes("loca.lt")) {
     baseUrl = process.env.PUBLIC_URL;
   } else if (process.env.render_url && process.env.render_url.startsWith("http")) {
     baseUrl = process.env.render_url;
   }
-  return `${baseUrl.replace(/\/+$/, "")}/uploads/banner_1791387999716.png`;
+  return baseUrl.replace(/\/+$/, "");
+}
+
+// ─── Get Public Order Banner URL ─────────────────────────────────────────────
+function getBannerUrl() {
+  const cfg = getConfig();
+  if (cfg.welcomeBannerUrl && cfg.welcomeBannerUrl.startsWith("http")) {
+    return cfg.welcomeBannerUrl;
+  }
+  const baseUrl = getPublicBaseUrl();
+  return `${baseUrl}/uploads/banner_1791387999716.png`;
 }
 
 // ─── Generate Dynamic UPI Payment Details ──────────────────────────────────────
@@ -281,22 +287,25 @@ function generateUpiDetails(order) {
   return { upiId, merchantName, amount, upiUrl, qrCodeUrl };
 }
 
-// ─── Send Online UPI QR Code Image Message ────────────────────────────────────
+// ─── Send Online UPI QR Code Image Message with Direct App Links ──────────────
 async function sendOnlinePaymentQR(to, order) {
-  const { upiId, merchantName, amount, upiUrl, qrCodeUrl } = generateUpiDetails(order);
+  const { upiId, merchantName, amount, qrCodeUrl } = generateUpiDetails(order);
+  const baseUrl = getPublicBaseUrl();
   console.log(`📱 Sending Online Payment QR (UPI: ${upiId}, Amount: ₹${amount}) to ${to}...`);
 
   const caption =
     `💳 *Pay Online via UPI (Razorpay)*\n` +
     `─────────────────────\n` +
     `*Order ID:* ${order.orderId}\n` +
-    `*Payable Amount:* ₹${amount}\n` +
+    `*Amount to Pay:* ₹${amount}\n` +
     `*Payee:* ${merchantName}\n` +
     `*UPI ID:* \`${upiId}\`\n\n` +
-    `📱 *Quick Pay Options:*\n` +
-    `1️⃣ Scan the QR code above with any UPI app (*Google Pay, PhonePe, Paytm, CRED, BHIM*)\n` +
-    `2️⃣ Or tap this UPI pay link:\n${upiUrl}\n\n` +
-    `⚡ _Once you complete payment in your UPI app, tap "✅ I Have Paid" below so we can verify!_`;
+    `📲 *Tap your UPI app below to pay:* 👇\n` +
+    `🟢 *Google Pay:* ${baseUrl}/pay/gpay/${order.orderId}\n` +
+    `🟣 *PhonePe:* ${baseUrl}/pay/phonepe/${order.orderId}\n` +
+    `🔵 *Paytm:* ${baseUrl}/pay/paytm/${order.orderId}\n` +
+    `⚡ *Any UPI App:* ${baseUrl}/pay/upi/${order.orderId}\n\n` +
+    `_Scan the QR code above or tap your UPI app to complete payment. Once your payment of ₹${amount} is received, we will automatically ask for your delivery location!_`;
 
   try {
     const res = await axios.post(
@@ -322,49 +331,62 @@ async function sendOnlinePaymentQR(to, order) {
   }
 }
 
-// ─── Send Payment Verification Prompt Message ────────────────────────────────
-async function sendPaymentVerificationPrompt(to, order) {
+// ─── Real Payment Verification & Success Notification ─────────────────────────
+async function handlePaymentSuccess(sender, order) {
+  if (!order || order.isPaid) return;
+  console.log(`🎉 Payment confirmed for Order ${order.orderId} from ${sender}!`);
+
+  order.isPaid = true;
+  order.paidAt = new Date().toISOString();
+  order.paymentMethod = "Online (UPI - Verified ✅)";
+
+  // 1. Notify customer in WhatsApp that payment was received
+  await sendText(
+    sender,
+    `🎉 *Payment Received!*\n\n` +
+    `We have received your payment of *₹${order.totalPayable}* via UPI (Razorpay) for Order *${order.orderId}*. ✅\n\n` +
+    `📍 *Please share your delivery location to confirm your order dispatch.* 👇`
+  );
+
+  // 2. If customer had already provided their location earlier, confirm immediately!
+  if (order.location) {
+    order.step = "ORDER_CONFIRMED";
+    await sendOrderConfirmed(sender, order, order.customerName || "Friend");
+    return;
+  }
+
+  // 3. Ask for delivery location
+  order.step = "AWAITING_LOCATION";
+  await sendLocationRequest(sender);
+}
+
+// ─── Optional: Razorpay API Real-Time Verification ───────────────────────────
+async function checkRazorpayApiPayment(order) {
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  if (!keyId || !keySecret) return false;
+
   try {
-    const res = await axios.post(
-      GRAPH_API_URL,
-      {
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to,
-        type: "interactive",
-        interactive: {
-          type: "button",
-          body: {
-            text:
-              `⏳ *Payment Pending (₹${order.totalPayable})*\n\n` +
-              `1️⃣ Scan the QR code above or tap the UPI pay link in your UPI app.\n` +
-              `2️⃣ After completing payment, tap *"✅ I Have Paid"* below.\n\n` +
-              `_The bot will verify your payment and then request your delivery location to confirm dispatch._`,
-          },
-          action: {
-            buttons: [
-              {
-                type: "reply",
-                reply: {
-                  id: "payment_completed",
-                  title: "✅ I Have Paid",
-                },
-              },
-            ],
-          },
-        },
-      },
-      { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
-    );
-    console.log(`✅ Payment verification prompt sent! Message ID: ${res.data?.messages?.[0]?.id}`);
+    const auth = Buffer.from(`${keyId}:${keySecret}`).toString("base64");
+    const res = await axios.get("https://api.razorpay.com/v1/payments?count=10", {
+      headers: { Authorization: `Basic ${auth}` },
+      timeout: 5000,
+    });
+    const items = res.data?.items || [];
+    const expectedPaise = Math.round(Number(order.totalPayable) * 100);
+    const match = items.find((p) => {
+      const isCaptured = p.status === "captured";
+      const amountMatches = p.amount === expectedPaise;
+      const noteMatches = p.notes?.order_id === order.orderId || p.description?.includes(order.orderId);
+      return isCaptured && (noteMatches || amountMatches);
+    });
+    return !!match;
   } catch (err) {
-    console.error("❌ sendPaymentVerificationPrompt FAILED:", JSON.stringify(err?.response?.data || err.message, null, 2));
-    await sendText(
-      to,
-      `⏳ *Payment Pending (₹${order.totalPayable})*\n\nPlease complete payment via the UPI QR code above, then reply *"PAID"* so we can verify and confirm your delivery!`
-    );
+    console.error("Razorpay API check error:", err.message);
+    return false;
   }
 }
+
 
 // ─── Send Payment Options Message (Image 1) ──────────────────────────────────
 async function sendPaymentOptions(to, order) {
@@ -594,23 +616,7 @@ async function handleFlowResponse(sender, responseData) {
 
       userCarts[sender] = items;
 
-      const itemListStr = items
-        .map((it, idx) => `${idx + 1}. 🎮 *${it.name}* — ₹${it.price}`)
-        .join("\n");
-      const subtotal = items.reduce((sum, it) => sum + (it.price * it.qty), 0);
-
-      await sendText(
-        sender,
-        `🛒 *Added to Cart!*\n\n` +
-        `You have selected ${items.length} item(s):\n\n` +
-        `${itemListStr}\n\n` +
-        `📦 *Total Items:* ${items.length}\n` +
-        `💰 *Subtotal:* ₹${subtotal}\n` +
-        `🚚 *Delivery:* Free Delivery\n\n` +
-        `Tap *"View items"* below to open your cart, change quantities, and place your order! 👇`
-      );
-
-      await new Promise((r) => setTimeout(r, 800));
+      // Directly display the native shopping cart without intermediate text message
       await sendCatalog(sender, productIds);
       return;
     }
@@ -788,63 +794,18 @@ app.post("/webhook", async (req, res) => {
           existingOrder.step = "AWAITING_PAYMENT_VERIFICATION";
           existingOrder.isPaid = false;
 
-          // Step 1: Send Razorpay UPI QR code image with pay link & instructions
+          // Send Razorpay UPI QR code image with direct UPI app links (GPay, PhonePe, Paytm, etc.)
           await sendOnlinePaymentQR(sender, existingOrder);
-
-          // Step 2: Send payment verification button ("✅ I Have Paid")
-          await sendPaymentVerificationPrompt(sender, existingOrder);
           return;
         } else {
           existingOrder.paymentMethod = "Cash on Delivery";
           existingOrder.step = "AWAITING_LOCATION";
           existingOrder.isPaid = false;
 
-          // Step 2: Request delivery location for COD order
+          // Request delivery location for COD order
           await sendLocationRequest(sender);
           return;
         }
-      }
-
-      // Customer tapped "✅ I Have Paid"
-      if (replyId === "payment_completed" || replyId === "check_payment") {
-        const order = userOrders[sender];
-        if (!order) {
-          await sendWelcomeWithFlow(sender);
-          return;
-        }
-
-        console.log(`💳 Verifying payment for Order ${order.orderId}...`);
-        order.isPaid = true;
-        order.paymentMethod = "Online (UPI - Verified ✅)";
-        order.paidAt = new Date().toISOString();
-
-        if (order.location) {
-          // If customer had already provided their location earlier
-          order.step = "ORDER_CONFIRMED";
-          await sendText(
-            sender,
-            `🎉 *Payment of ₹${order.totalPayable} Verified!* ✅\n\nOrder ID: *${order.orderId}*`
-          );
-          const customerName =
-            body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.profile?.name ||
-            order.customerName ||
-            "Friend";
-          await sendOrderConfirmed(sender, order, customerName);
-          return;
-        }
-
-        // Payment is verified! Now ask for delivery location to confirm order
-        order.step = "AWAITING_LOCATION";
-        await sendText(
-          sender,
-          `✅ *Payment Verified Successfully!*\n\n` +
-          `• *Order ID:* ${order.orderId}\n` +
-          `• *Amount Received:* ₹${order.totalPayable}\n` +
-          `• *Payment Method:* UPI (Razorpay)\n\n` +
-          `📍 *Please share your delivery location now to complete and confirm your order dispatch!* 👇`
-        );
-        await sendLocationRequest(sender);
-        return;
       }
 
       if (replyId?.startsWith("track_")) {
@@ -880,10 +841,9 @@ app.post("/webhook", async (req, res) => {
           await sendText(
             sender,
             `📍 *Delivery location saved!*\n\n` +
-            `⚠️ *Payment Pending:* Your online payment of *₹${existingOrder.totalPayable}* for Order *${existingOrder.orderId}* is not yet verified.\n\n` +
-            `Please complete payment via the UPI QR code above, then tap *"✅ I Have Paid"* to confirm your order dispatch! 👇`
+            `⚠️ *Payment Pending:* Your online payment of *₹${existingOrder.totalPayable}* for Order *${existingOrder.orderId}* is not yet received.\n\n` +
+            `Please tap your UPI app (Google Pay, PhonePe, Paytm) above to complete payment. As soon as your payment is confirmed, your order will be dispatched immediately!`
           );
-          await sendPaymentVerificationPrompt(sender, existingOrder);
           return;
         }
 
@@ -976,7 +936,6 @@ app.post("/webhook", async (req, res) => {
           existingOrder.step = "AWAITING_PAYMENT_VERIFICATION";
           existingOrder.isPaid = false;
           await sendOnlinePaymentQR(sender, existingOrder);
-          await sendPaymentVerificationPrompt(sender, existingOrder);
           return;
         }
         if (lower.includes("cod") || lower.includes("cash")) {
@@ -988,44 +947,30 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // Check if user is awaiting payment verification and typed "paid" / "done"
-      if (existingOrder && (existingOrder.step === "AWAITING_PAYMENT_VERIFICATION" || (!existingOrder.isPaid && (lower.includes("paid") || lower.includes("done"))))) {
-        if (lower.includes("paid") || lower.includes("done") || lower.includes("completed") || lower.includes("upi")) {
-          console.log(`💳 Verifying text payment claim for Order ${existingOrder.orderId}...`);
-          existingOrder.isPaid = true;
-          existingOrder.paymentMethod = "Online (UPI - Verified ✅)";
-          existingOrder.paidAt = new Date().toISOString();
-
-          if (existingOrder.location) {
-            existingOrder.step = "ORDER_CONFIRMED";
-            await sendText(
-              sender,
-              `🎉 *Payment of ₹${existingOrder.totalPayable} Verified!* ✅\n\nOrder ID: *${existingOrder.orderId}*`
-            );
-            const customerName =
-              body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.profile?.name ||
-              existingOrder.customerName ||
-              "Friend";
-            await sendOrderConfirmed(sender, existingOrder, customerName);
+      // Check if user is awaiting payment verification and asks status or claims payment
+      if (existingOrder && existingOrder.step === "AWAITING_PAYMENT_VERIFICATION" && !existingOrder.isPaid) {
+        if (lower.includes("paid") || lower.includes("done") || lower.includes("check") || lower.includes("status")) {
+          console.log(`🔍 Checking payment status with Razorpay for Order ${existingOrder.orderId}...`);
+          const apiVerified = await checkRazorpayApiPayment(existingOrder);
+          if (apiVerified) {
+            await handlePaymentSuccess(sender, existingOrder);
             return;
           }
 
-          existingOrder.step = "AWAITING_LOCATION";
+          // If NOT verified yet, do NOT blindly confirm! Tell the user:
           await sendText(
             sender,
-            `✅ *Payment Verified Successfully!*\n\n` +
-            `• *Order ID:* ${existingOrder.orderId}\n` +
-            `• *Amount Received:* ₹${existingOrder.totalPayable}\n` +
-            `• *Payment Method:* UPI (Razorpay)\n\n` +
-            `📍 *Please share your delivery location now to complete and confirm your order dispatch!* 👇`
+            `⏳ *Payment Not Received Yet*\n\n` +
+            `We checked our system, but have not yet received payment of *₹${existingOrder.totalPayable}* for Order *${existingOrder.orderId}*.\n\n` +
+            `Please tap your UPI app (Google Pay, PhonePe, Paytm) above to complete the payment.\n\n` +
+            `_As soon as the payment is confirmed, we will automatically ask for your delivery location!_`
           );
-          await sendLocationRequest(sender);
           return;
         }
       }
 
       // Check if user is waiting to share location and typed text address (e.g. GPS disabled fallback)
-      if (existingOrder && existingOrder.step === "AWAITING_LOCATION") {
+      if (existingOrder && (existingOrder.step === "AWAITING_LOCATION" || existingOrder.step === "AWAITING_PAYMENT_VERIFICATION")) {
         existingOrder.location = { address: bodyText };
 
         // If online payment and not yet verified: DO NOT confirm order!
@@ -1033,9 +978,9 @@ app.post("/webhook", async (req, res) => {
           await sendText(
             sender,
             `📍 *Delivery address saved!*\n\n` +
-            `⚠️ *Payment Pending:* Please complete your payment of *₹${existingOrder.totalPayable}* via the QR code above and tap *"✅ I Have Paid"* to confirm dispatch! 👇`
+            `⚠️ *Payment Pending:* Your online payment of *₹${existingOrder.totalPayable}* for Order *${existingOrder.orderId}* is not yet received.\n\n` +
+            `Please tap your UPI app (Google Pay, PhonePe, Paytm) above to complete payment. As soon as your payment is received, your order will be confirmed immediately!`
           );
-          await sendPaymentVerificationPrompt(sender, existingOrder);
           return;
         }
 
@@ -1161,6 +1106,99 @@ app.get("/pay/:orderId", (req, res) => {
 </html>`);
 });
 
+// ─── Direct UPI App Redirects (Google Pay, PhonePe, Paytm, Universal UPI) ─────
+app.get("/pay/:app/:orderId", (req, res) => {
+  const { app: appName, orderId } = req.params;
+  const order = Object.values(userOrders).find((o) => o.orderId === orderId) || {
+    orderId,
+    totalPayable: 1,
+  };
+
+  const { upiId, merchantName, amount } = generateUpiDetails(order);
+  const note = `Order ${orderId}`;
+  const baseUpi = `pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(merchantName)}&am=${amount}&cu=INR&tn=${encodeURIComponent(note)}`;
+
+  let deepLink = `upi://pay?${baseUpi}`;
+  let appTitle = "UPI App";
+
+  if (appName === "gpay") {
+    deepLink = `tez://upi/pay?${baseUpi}`;
+    appTitle = "Google Pay";
+  } else if (appName === "phonepe") {
+    deepLink = `phonepe://pay?${baseUpi}`;
+    appTitle = "PhonePe";
+  } else if (appName === "paytm") {
+    deepLink = `paytmmp://pay?${baseUpi}`;
+    appTitle = "Paytm";
+  } else if (appName === "upi") {
+    deepLink = `upi://pay?${baseUpi}`;
+    appTitle = "UPI App";
+  }
+
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Opening ${appTitle}...</title>
+  <meta http-equiv="refresh" content="0;url=${deepLink}">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f0f2f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+    .box { background: white; padding: 32px 24px; border-radius: 16px; text-align: center; max-width: 380px; width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+    .btn { display: block; background: #075e54; color: white; text-decoration: none; padding: 14px 24px; border-radius: 10px; font-weight: bold; margin-top: 24px; font-size: 16px; }
+    .btn:hover { background: #128c7e; }
+  </style>
+  <script>
+    // Instantly launch target UPI app
+    window.location.href = "${deepLink}";
+    setTimeout(function() {
+      // Fallback to standard upi:// if specific app is not installed
+      window.location.href = "upi://pay?${baseUpi}";
+    }, 1500);
+  </script>
+</head>
+<body>
+  <div class="box">
+    <h3 style="margin: 0 0 8px;">Opening ${appTitle}...</h3>
+    <p style="color: #667781; font-size: 14px; margin: 0 0 16px;">Paying ₹${amount} for Order <strong>${orderId}</strong></p>
+    <a class="btn" href="${deepLink}">👉 Open ${appTitle}</a>
+    <p style="color: #888; font-size: 12px; margin-top: 20px; line-height: 1.5;">After paying, return to WhatsApp to provide your delivery address.</p>
+  </div>
+</body>
+</html>`);
+});
+
+// ─── Razorpay Webhook Endpoint ────────────────────────────────────────────────
+app.post(["/razorpay-webhook", "/webhook/razorpay"], async (req, res) => {
+  const event = req.body?.event;
+  const payment = req.body?.payload?.payment?.entity;
+  console.log("⚡ Razorpay Webhook received:", event, payment?.id, payment?.amount);
+
+  if (event === "payment.captured" || event === "order.paid") {
+    const noteOrderId = payment?.notes?.order_id || payment?.description;
+    for (const [phone, order] of Object.entries(userOrders)) {
+      if (!order.isPaid && ((noteOrderId && order.orderId.includes(noteOrderId)) || order.step === "AWAITING_PAYMENT_VERIFICATION")) {
+        console.log(`✅ Order ${order.orderId} marked paid via Razorpay webhook.`);
+        await handlePaymentSuccess(phone, order);
+        break;
+      }
+    }
+  }
+  res.json({ status: "ok" });
+});
+
+// ─── Test / Simulation Endpoint to Trigger Payment Done ───────────────────────
+app.all("/api/payment/simulate/:orderId", async (req, res) => {
+  const { orderId } = req.params;
+  for (const [phone, order] of Object.entries(userOrders)) {
+    if (order.orderId === orderId || !order.isPaid) {
+      await handlePaymentSuccess(phone, order);
+      return res.json({ success: true, message: `Payment simulated for order ${order.orderId}` });
+    }
+  }
+  res.status(404).json({ error: "Order not found" });
+});
+
 // ─── Bot Health & Integration Status ──────────────────────────────────────────
 app.get("/api/status", (req, res) => {
   res.json({
@@ -1179,26 +1217,6 @@ app.get("/api/status", (req, res) => {
       merchant_name: process.env.RAZORPAY_MERCHANT_NAME || "Devine Food Products",
     },
   });
-});
-
-// ─── Razorpay Webhook Endpoint ────────────────────────────────────────────────
-app.post("/razorpay-webhook", (req, res) => {
-  const event = req.body?.event;
-  const payment = req.body?.payload?.payment?.entity;
-  console.log("⚡ Razorpay Webhook received:", event, payment?.id, payment?.amount);
-
-  if (event === "payment.captured" || event === "order.paid") {
-    for (const [phone, order] of Object.entries(userOrders)) {
-      if (!order.isPaid) {
-        order.isPaid = true;
-        order.paymentMethod = "Online (UPI - Verified ✅)";
-        order.paidAt = new Date().toISOString();
-        console.log(`✅ Order ${order.orderId} marked paid via Razorpay webhook.`);
-        break;
-      }
-    }
-  }
-  res.json({ status: "ok" });
 });
 
 app.get("/", (req, res) => res.send("WhatsApp bot is running 🟢"));
