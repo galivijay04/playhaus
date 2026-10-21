@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: playhaus
+    env: node
+    plan: free
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
