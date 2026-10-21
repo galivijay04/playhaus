@@ -6,12 +6,15 @@ node_modules/
 # Large generated files (base64 images inside — too big for git)
 flow.json
 PASTE-THIS-IN-META.json
+flow-meta.json
 
 # Cloudflared binary
 cloudflared.exe
 
-# Upload files
-admin/uploads/
+# Upload files (keep default assets)
+admin/uploads/*
+!admin/uploads/banner_*.png
+!admin/uploads/banner_*.webp
 
 # OS
 .DS_Store
