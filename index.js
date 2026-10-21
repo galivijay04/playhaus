@@ -551,11 +551,11 @@ async function sendAppPaymentLauncher(to, order, appChoice) {
   }
 }
 
-// ─── Send Online UPI QR Code Image Message + Interactive App Selector ─────────
+// ─── Send Online UPI QR Code Image Message + Interactive App Selector (1 Single Message) ───
 async function sendOnlinePaymentQR(to, order) {
   const { upiId, merchantName, amount, qrCodeUrl } = generateUpiDetails(order);
   const baseUrl = getPublicBaseUrl();
-  console.log(`📱 Sending Online Payment QR & App Selector (Amount: ₹${amount}) to ${to}...`);
+  console.log(`📱 Sending Online Payment QR with App Selector (Amount: ₹${amount}) to ${to}...`);
 
   const qrCardBody =
     `💳 *Pay Online via UPI*\n` +
@@ -564,11 +564,10 @@ async function sendOnlinePaymentQR(to, order) {
     `*Amount to Pay:* ₹${amount}\n` +
     `*Payee:* ${merchantName}\n` +
     `*UPI ID:* \`${upiId}\`\n\n` +
-    `_Scan this QR code with any UPI app, or tap below to pay directly in your UPI app:_`;
+    `_Scan the QR code above or select your UPI app below:_`;
 
-  // 1. Send the QR code card with interactive CTA button [ ⚡ Pay with UPI ] (no raw URL links)
   try {
-    const res1 = await axios.post(
+    const res = await axios.post(
       GRAPH_API_URL,
       {
         messaging_product: "whatsapp",
@@ -576,27 +575,28 @@ async function sendOnlinePaymentQR(to, order) {
         to,
         type: "interactive",
         interactive: {
-          type: "cta_url",
+          type: "button",
           header: {
             type: "image",
             image: { link: qrCodeUrl },
           },
           body: { text: qrCardBody },
-          footer: { text: "Playhaus Games" },
+          footer: { text: "Playhaus Games • UPI Payment" },
           action: {
-            name: "cta_url",
-            parameters: {
-              display_text: "⚡ Pay with UPI",
-              url: `${baseUrl}/pay/upi/${order.orderId}`,
-            },
+            buttons: [
+              { type: "reply", reply: { id: "pay_app_gpay", title: "🟢 Google Pay" } },
+              { type: "reply", reply: { id: "pay_app_phonepe", title: "🟣 PhonePe" } },
+              { type: "reply", reply: { id: "pay_app_paytm", title: "🔵 Paytm" } },
+            ],
           },
         },
       },
       { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
     );
-    console.log(`✅ QR Card sent! Message ID: ${res1.data?.messages?.[0]?.id}`);
-  } catch (err1) {
-    console.log("ℹ️ Fallback to image message for QR code:", err1?.response?.data?.error?.message || err1.message);
+    console.log(`✅ Single QR + App Buttons message sent! Message ID: ${res.data?.messages?.[0]?.id}`);
+    return true;
+  } catch (err) {
+    console.error("❌ sendOnlinePaymentQR FAILED:", JSON.stringify(err?.response?.data || err.message, null, 2));
     try {
       await axios.post(
         GRAPH_API_URL,
@@ -604,59 +604,27 @@ async function sendOnlinePaymentQR(to, order) {
           messaging_product: "whatsapp",
           recipient_type: "individual",
           to,
-          type: "image",
-          image: {
-            link: qrCodeUrl,
-            caption: qrCardBody,
+          type: "interactive",
+          interactive: {
+            type: "cta_url",
+            header: { type: "image", image: { link: qrCodeUrl } },
+            body: { text: qrCardBody },
+            footer: { text: "Playhaus Games" },
+            action: {
+              name: "cta_url",
+              parameters: {
+                display_text: "⚡ Pay with UPI",
+                url: `${baseUrl}/pay/upi/${order.orderId}`,
+              },
+            },
           },
         },
         { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
       );
-    } catch (_) {}
-  }
-
-  // 2. Send Interactive App Selector List below the QR (Google Pay, PhonePe, Paytm, Any UPI)
-  try {
-    const res2 = await axios.post(
-      GRAPH_API_URL,
-      {
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to,
-        type: "interactive",
-        interactive: {
-          type: "list",
-          header: {
-            type: "text",
-            text: "Select Payment App 📱",
-          },
-          body: {
-            text: `Choose your preferred UPI app below to pay ₹${amount} directly:`,
-          },
-          footer: {
-            text: "Instant UPI Payment",
-          },
-          action: {
-            button: "Select App 💳",
-            sections: [
-              {
-                title: "Pay via UPI App",
-                rows: [
-                  { id: "pay_app_gpay", title: "🟢 Google Pay", description: `Pay ₹${amount} via Google Pay` },
-                  { id: "pay_app_phonepe", title: "🟣 PhonePe", description: `Pay ₹${amount} via PhonePe` },
-                  { id: "pay_app_paytm", title: "🔵 Paytm", description: `Pay ₹${amount} via Paytm` },
-                  { id: "pay_app_upi", title: "⚡ Any UPI App", description: "BHIM, CRED, Navi, or other" },
-                ],
-              },
-            ],
-          },
-        },
-      },
-      { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
-    );
-    console.log(`✅ App selector list sent! Message ID: ${res2.data?.messages?.[0]?.id}`);
-  } catch (err2) {
-    console.error("❌ App selector list failed:", JSON.stringify(err2?.response?.data || err2.message, null, 2));
+    } catch (_) {
+      await sendText(to, `${qrCardBody}\n\n👉 Pay: ${baseUrl}/pay/${order.orderId}`);
+    }
+    return false;
   }
 }
 
@@ -1130,10 +1098,7 @@ app.post("/webhook", async (req, res) => {
           existingOrder.isPaid = false;
           await syncOrderToDb(sender, existingOrder);
 
-          // 1. Send Order Review Card first (exact match to reference screenshot)
-          await sendOrderReviewCard(sender, existingOrder);
-
-          // 2. Send Razorpay UPI QR code image with direct UPI app links (GPay, PhonePe, Paytm, etc.)
+          // Exactly 1 message: Razorpay UPI QR code image with direct UPI app buttons
           await sendOnlinePaymentQR(sender, existingOrder);
           return;
         } else {
@@ -1146,6 +1111,17 @@ app.post("/webhook", async (req, res) => {
           await sendLocationRequest(sender);
           return;
         }
+      }
+
+      // App selection button clicked on the QR card
+      if (replyId?.startsWith("pay_app_")) {
+        const appChoice = replyId.replace("pay_app_", ""); // "gpay", "phonepe", "paytm", "upi"
+        const existingOrder = userOrders[sender] || {
+          orderId: `PH-B2C-${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
+          totalPayable: 1,
+        };
+        await sendAppPaymentLauncher(sender, existingOrder, appChoice);
+        return;
       }
 
       if (replyId?.startsWith("track_")) {
@@ -1307,7 +1283,7 @@ app.post("/webhook", async (req, res) => {
           existingOrder.paymentMethod = "Online (UPI - Razorpay)";
           existingOrder.step = "AWAITING_PAYMENT_VERIFICATION";
           existingOrder.isPaid = false;
-          await sendOrderReviewCard(sender, existingOrder);
+          await syncOrderToDb(sender, existingOrder);
           await sendOnlinePaymentQR(sender, existingOrder);
           return;
         }
