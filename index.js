@@ -873,8 +873,18 @@ app.post("/webhook", async (req, res) => {
         );
         const name = found?.name || item.product_retailer_id;
         const catalogPrice = parseInt(found?.price?.replace(/[^\d]/g, "")) || 1;
-        const price = item.item_price ? (item.item_price < 100 ? item.item_price : Math.round(item.item_price / 100)) : catalogPrice;
-        const qty = item.quantity || 1;
+        let price = catalogPrice;
+        if (typeof item.item_price === "number") {
+          if (item.item_price === 100) {
+            price = 1;
+          } else if (item.item_price < 100 && item.item_price > 0) {
+            price = item.item_price;
+          }
+        }
+        // Ensure sample products configured at 1 Rupee are strictly 1 Rupee
+        if (catalogPrice === 1) {
+          price = 1;
+        }        const qty = item.quantity || 1;
         const lineTotal = price * qty;
         itemsTotal += lineTotal;
         return {
