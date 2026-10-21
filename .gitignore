@@ -7,6 +7,7 @@ node_modules/
 flow.json
 PASTE-THIS-IN-META.json
 flow-meta.json
+cart-flow.json
 
 # Cloudflared binary
 cloudflared.exe
