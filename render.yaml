@@ -7,3 +7,6 @@ services:
     buildCommand: npm install
     startCommand: npm start
     autoDeploy: true
+    envVars:
+      - key: MONGODB_URI
+        value: mongodb+srv://r26742387_db_user:JNqJipcxT7FbIXRw@cluster0.rytjyvn.mongodb.net/playhaus?retryWrites=true&w=majority&appName=Cluster0

@@ -1,11 +1,24 @@
 require("dotenv").config();
-const express = require("express");
-const axios   = require("axios");
-const fs      = require("fs");
-const path    = require("path");
+const express  = require("express");
+const axios    = require("axios");
+const fs       = require("fs");
+const path     = require("path");
+const mongoose = require("mongoose");
+const Order    = require("./models/Order");
+const UserSession = require("./models/UserSession");
 
 const app = express();
 app.use(express.json());
+
+// ─── MongoDB Atlas Database Connection ───────────────────────────────────────
+const MONGODB_URI =
+  process.env.MONGODB_URI ||
+  "mongodb+srv://r26742387_db_user:JNqJipcxT7FbIXRw@cluster0.rytjyvn.mongodb.net/playhaus?retryWrites=true&w=majority&appName=Cluster0";
+
+mongoose
+  .connect(MONGODB_URI)
+  .then(() => console.log("🍃 Connected to MongoDB Atlas (Database: playhaus)"))
+  .catch((err) => console.error("❌ MongoDB Atlas connection error:", err.message));
 
 // ─── Serve uploaded banners publicly (ngrok tunnels port 3000) ───────────────
 app.use("/uploads", express.static(path.join(__dirname, "admin", "uploads")));
@@ -17,6 +30,54 @@ const FLOW_PATH     = path.join(__dirname, "flow.json");
 const FLOW_ID       = "1090157514003637";
 const userCarts     = {};
 const userOrders    = {};
+
+// ─── Database Sync Helpers ──────────────────────────────────────────────────
+async function syncOrderToDb(sender, order) {
+  if (!order || !order.orderId) return;
+  userOrders[sender] = order;
+  try {
+    const orderDoc = {
+      orderId: order.orderId,
+      sender,
+      customerName: order.customerName || "Customer",
+      items: order.items || [],
+      itemsTotal: Number(order.itemsTotal || 1),
+      deliveryFee: Number(order.deliveryFee || 0),
+      totalPayable: Number(order.totalPayable || 1),
+      expectedDelivery: order.expectedDelivery || "",
+      buyerNote: order.buyerNote || "",
+      paymentMethod: order.paymentMethod || null,
+      isPaid: Boolean(order.isPaid),
+      paidAt: order.paidAt ? new Date(order.paidAt) : null,
+      location: order.location || null,
+      step: order.step || "AWAITING_PAYMENT",
+    };
+
+    await Order.findOneAndUpdate(
+      { orderId: order.orderId },
+      { $set: orderDoc },
+      { upsert: true, returnDocument: "after" }
+    );
+    console.log(`💾 Order ${order.orderId} synced to MongoDB Atlas.`);
+  } catch (err) {
+    console.error(`⚠️ Error syncing order ${order.orderId} to MongoDB:`, err.message);
+  }
+}
+
+async function getActiveOrder(sender) {
+  if (userOrders[sender]) return userOrders[sender];
+  try {
+    const doc = await Order.findOne({ sender }).sort({ createdAt: -1 });
+    if (doc) {
+      const orderObj = doc.toObject();
+      userOrders[sender] = orderObj;
+      return orderObj;
+    }
+  } catch (err) {
+    console.error("⚠️ Error retrieving order from MongoDB:", err.message);
+  }
+  return null;
+}
 
 // ─── Always read fresh config ─────────────────────────────────────────────────
 function getConfig() {
@@ -608,6 +669,9 @@ async function handlePaymentSuccess(sender, order) {
   order.paidAt = new Date().toISOString();
   order.paymentMethod = "Online (UPI - Verified ✅)";
 
+  // Sync paid status to MongoDB Atlas
+  await syncOrderToDb(sender, order);
+
   // 1. Notify customer in WhatsApp that payment was received
   await sendText(
     sender,
@@ -619,12 +683,14 @@ async function handlePaymentSuccess(sender, order) {
   // 2. If customer had already provided their location earlier, confirm immediately!
   if (order.location) {
     order.step = "ORDER_CONFIRMED";
+    await syncOrderToDb(sender, order);
     await sendOrderConfirmed(sender, order, order.customerName || "Friend");
     return;
   }
 
   // 3. Ask for delivery location
   order.step = "AWAITING_LOCATION";
+  await syncOrderToDb(sender, order);
   await sendLocationRequest(sender);
 }
 
@@ -951,6 +1017,7 @@ async function handleFlowResponse(sender, responseData) {
       location: null,
       step: "AWAITING_PAYMENT",
     };
+    await syncOrderToDb(sender, userOrders[sender]);
 
     await sendPaymentOptions(sender, userOrders[sender]);
     return;
@@ -1061,6 +1128,7 @@ app.post("/webhook", async (req, res) => {
           existingOrder.paymentMethod = "Online (UPI - Razorpay)";
           existingOrder.step = "AWAITING_PAYMENT_VERIFICATION";
           existingOrder.isPaid = false;
+          await syncOrderToDb(sender, existingOrder);
 
           // 1. Send Order Review Card first (exact match to reference screenshot)
           await sendOrderReviewCard(sender, existingOrder);
@@ -1072,6 +1140,7 @@ app.post("/webhook", async (req, res) => {
           existingOrder.paymentMethod = "Cash on Delivery";
           existingOrder.step = "AWAITING_LOCATION";
           existingOrder.isPaid = false;
+          await syncOrderToDb(sender, existingOrder);
 
           // Request delivery location for COD order
           await sendLocationRequest(sender);
@@ -1121,6 +1190,7 @@ app.post("/webhook", async (req, res) => {
 
       if (existingOrder) {
         existingOrder.location = loc;
+        await syncOrderToDb(sender, existingOrder);
 
         // If online payment and not yet paid: DO NOT confirm order!
         if (existingOrder.paymentMethod?.includes("Online") && !existingOrder.isPaid) {
@@ -1136,6 +1206,7 @@ app.post("/webhook", async (req, res) => {
 
         // For COD, or for Online when payment is verified: Confirm order!
         existingOrder.step = "ORDER_CONFIRMED";
+        await syncOrderToDb(sender, existingOrder);
         await sendOrderConfirmed(sender, existingOrder, customerName);
         return;
       }
@@ -1217,6 +1288,7 @@ app.post("/webhook", async (req, res) => {
         location: null,
         step: "AWAITING_PAYMENT",
       };
+      await syncOrderToDb(sender, userOrders[sender]);
 
       // Step 1: Send Payment options message with Online & COD buttons (Image 1)
       await sendPaymentOptions(sender, userOrders[sender]);
@@ -1351,15 +1423,24 @@ app.get("/flow.json", (req, res) => {
 });
 
 // ─── Web Payment Checkout View (Browser preview / direct UPI link) ──────────
-app.get("/pay/:orderId", (req, res) => {
+app.get("/pay/:orderId", async (req, res) => {
   const { orderId } = req.params;
-  const order = Object.values(userOrders).find((o) => o.orderId === orderId) || {
-    orderId,
-    totalPayable: 1,
-    items: [{ name: "Playhaus Game", qty: 1, price: 1 }],
-    deliveryFee: 0,
-    itemsTotal: 1,
-  };
+  let order = Object.values(userOrders).find((o) => o.orderId === orderId);
+  if (!order) {
+    try {
+      const doc = await Order.findOne({ orderId });
+      if (doc) order = doc.toObject();
+    } catch (_) {}
+  }
+  if (!order) {
+    order = {
+      orderId,
+      totalPayable: 1,
+      items: [{ name: "Playhaus Game", qty: 1, price: 1 }],
+      deliveryFee: 0,
+      itemsTotal: 1,
+    };
+  }
 
   const { upiId, merchantName, amount, upiUrl, qrCodeUrl } = generateUpiDetails(order);
 
@@ -1408,12 +1489,21 @@ app.get("/pay/:orderId", (req, res) => {
 });
 
 // ─── Direct UPI App Redirects (Google Pay, PhonePe, Paytm, Universal UPI) ─────
-app.get("/pay/:app/:orderId", (req, res) => {
+app.get("/pay/:app/:orderId", async (req, res) => {
   const { app: appName, orderId } = req.params;
-  const order = Object.values(userOrders).find((o) => o.orderId === orderId) || {
-    orderId,
-    totalPayable: 1,
-  };
+  let order = Object.values(userOrders).find((o) => o.orderId === orderId);
+  if (!order) {
+    try {
+      const doc = await Order.findOne({ orderId });
+      if (doc) order = doc.toObject();
+    } catch (_) {}
+  }
+  if (!order) {
+    order = {
+      orderId,
+      totalPayable: 1,
+    };
+  }
 
   const { upiId, merchantName, amount } = generateUpiDetails(order);
   const note = `Order ${orderId}`;
@@ -1477,11 +1567,28 @@ app.post(["/razorpay-webhook", "/webhook/razorpay"], async (req, res) => {
 
   if (event === "payment.captured" || event === "order.paid") {
     const noteOrderId = payment?.notes?.order_id || payment?.description;
+    let matched = false;
+
     for (const [phone, order] of Object.entries(userOrders)) {
       if (!order.isPaid && ((noteOrderId && order.orderId.includes(noteOrderId)) || order.step === "AWAITING_PAYMENT_VERIFICATION")) {
         console.log(`✅ Order ${order.orderId} marked paid via Razorpay webhook.`);
         await handlePaymentSuccess(phone, order);
+        matched = true;
         break;
+      }
+    }
+
+    // Also check MongoDB Atlas if order was created across restart
+    if (!matched && noteOrderId) {
+      try {
+        const dbOrder = await Order.findOne({ orderId: { $regex: noteOrderId, $options: "i" }, isPaid: false });
+        if (dbOrder) {
+          console.log(`✅ MongoDB Order ${dbOrder.orderId} marked paid via Razorpay webhook.`);
+          const orderObj = dbOrder.toObject();
+          await handlePaymentSuccess(orderObj.sender, orderObj);
+        }
+      } catch (err) {
+        console.error("MongoDB webhook match error:", err.message);
       }
     }
   }
@@ -1497,7 +1604,38 @@ app.all("/api/payment/simulate/:orderId", async (req, res) => {
       return res.json({ success: true, message: `Payment simulated for order ${order.orderId}` });
     }
   }
+
+  // Check MongoDB
+  try {
+    const dbOrder = await Order.findOne({ orderId });
+    if (dbOrder) {
+      const orderObj = dbOrder.toObject();
+      await handlePaymentSuccess(orderObj.sender, orderObj);
+      return res.json({ success: true, message: `Payment simulated for MongoDB order ${orderObj.orderId}` });
+    }
+  } catch (_) {}
+
   res.status(404).json({ error: "Order not found" });
+});
+
+// ─── API to View Persisted Orders from MongoDB ────────────────────────────────
+app.get("/api/orders", async (req, res) => {
+  try {
+    const orders = await Order.find().sort({ createdAt: -1 }).limit(100);
+    res.json({ count: orders.length, orders });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/orders/:orderId", async (req, res) => {
+  try {
+    const order = await Order.findOne({ orderId: req.params.orderId });
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Bot Health & Integration Status ──────────────────────────────────────────
@@ -1505,6 +1643,12 @@ app.get("/api/status", (req, res) => {
   res.json({
     status: "healthy",
     uptime: process.uptime(),
+    database: {
+      type: "MongoDB Atlas",
+      connected: mongoose.connection.readyState === 1,
+      database: mongoose.connection.name || "playhaus",
+      cluster: "cluster0.rytjyvn.mongodb.net",
+    },
     webhook: {
       url: "https://playhaus.onrender.com/webhook",
       subscribed: true,
