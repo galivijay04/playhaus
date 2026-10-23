@@ -334,8 +334,8 @@ function getBannerUrl() {
 
 // ─── Generate Dynamic UPI Payment Details ──────────────────────────────────────
 function generateUpiDetails(order) {
-  const upiId = process.env.RAZORPAY_UPI_ID || "devine@razorpay";
-  const merchantName = process.env.RAZORPAY_MERCHANT_NAME || "Playhaus Games";
+  const upiId = process.env.RAZORPAY_UPI_ID || "8801414663@ybl";
+  const merchantName = process.env.RAZORPAY_MERCHANT_NAME || "vijay g";
   const amount = Number(order.totalPayable || 0).toFixed(2);
   const note = `Order ${order.orderId}`;
   const tr = String(order.orderId || "PH").replace(/[^a-zA-Z0-9]/g, "");
@@ -1875,8 +1875,8 @@ app.get("/api/status", (req, res) => {
       account_id: process.env.RAZORPAY_ACCOUNT_ID || "acc_Rl7A6E91g4TV40",
       configuration_name: process.env.RAZORPAY_CONFIG_NAME || "devine",
       status: "Active",
-      upi_id: process.env.RAZORPAY_UPI_ID || "devine@razorpay",
-      merchant_name: process.env.RAZORPAY_MERCHANT_NAME || "Devine Food Products",
+      upi_id: process.env.RAZORPAY_UPI_ID || "8801414663@ybl",
+      merchant_name: process.env.RAZORPAY_MERCHANT_NAME || "vijay g",
     },
   });
 });
