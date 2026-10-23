@@ -216,8 +216,9 @@ async function sendWelcomeWithFlow(to) {
     `${cfg.welcomeMessage || "Welcome to *PlayHaus: Kheloge Toh Khiloge* 🎉"}\n\n` +
     `${cfg.flowBodyText   || "What would you like to do today?"}`;
 
-  const header = cfg.welcomeBannerUrl
-    ? { type: "image", image: { link: cfg.welcomeBannerUrl } }
+  const bannerUrl = getBannerUrl();
+  const header = bannerUrl
+    ? { type: "image", image: { link: bannerUrl } }
     : { type: "text",  text:  "🎮 Playhaus" };
 
   try {
@@ -250,6 +251,38 @@ async function sendWelcomeWithFlow(to) {
     console.log(`✅ Welcome flow sent! Message ID: ${res.data?.messages?.[0]?.id}`);
   } catch (err) {
     console.error(`❌ sendWelcomeWithFlow FAILED:`, JSON.stringify(err?.response?.data || err.message, null, 2));
+    if (header.type === "image") {
+      try {
+        console.log("ℹ️ Retrying welcome flow with text header fallback...");
+        await axios.post(
+          GRAPH_API_URL,
+          {
+            messaging_product: "whatsapp",
+            recipient_type: "individual",
+            to,
+            type: "interactive",
+            interactive: {
+              type:   "flow",
+              header: { type: "text", text: "🎮 Playhaus" },
+              body:   { text: fullBody },
+              footer: { text: cfg.flowFooterText || "Kheloge Toh Khiloge ✨" },
+              action: {
+                name: "flow",
+                parameters: {
+                  flow_message_version: "3",
+                  flow_token:           `flow-${to}-${Date.now()}`,
+                  flow_id:              FLOW_ID,
+                  flow_cta:             cfg.flowCtaText || "Choose a Service",
+                  flow_action:          "navigate",
+                },
+              },
+            },
+          },
+          { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+        );
+        return;
+      } catch (_) {}
+    }
     throw err;
   }
 }
