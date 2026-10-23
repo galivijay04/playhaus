@@ -335,17 +335,18 @@ function getBannerUrl() {
 // ─── Generate Dynamic UPI Payment Details ──────────────────────────────────────
 function generateUpiDetails(order) {
   const upiId = process.env.RAZORPAY_UPI_ID || "devine@razorpay";
-  const merchantName = process.env.RAZORPAY_MERCHANT_NAME || "Devine Food Products";
+  const merchantName = process.env.RAZORPAY_MERCHANT_NAME || "Playhaus Games";
   const amount = Number(order.totalPayable || 0).toFixed(2);
   const note = `Order ${order.orderId}`;
+  const tr = String(order.orderId || "PH").replace(/[^a-zA-Z0-9]/g, "");
 
-  // Standard NPCI UPI URI
-  const upiUrl = `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(merchantName)}&am=${amount}&cu=INR&tn=${encodeURIComponent(note)}`;
+  // Standard NPCI UPI URI with transaction reference (tr)
+  const upiUrl = `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(merchantName)}&am=${amount}&cu=INR&tn=${encodeURIComponent(note)}&tr=${encodeURIComponent(tr)}`;
 
   // Dynamic QR Code image URL via secure QR generator
   const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=500x500&margin=15&format=png&data=${encodeURIComponent(upiUrl)}`;
 
-  return { upiId, merchantName, amount, upiUrl, qrCodeUrl };
+  return { upiId, merchantName, amount, upiUrl, qrCodeUrl, tr };
 }
 
 // ─── Send Order Review Card (Exact Replica of WhatsApp In-Chat Order Details) ───
@@ -1398,6 +1399,340 @@ app.get("/flow.json", (req, res) => {
   }
 });
 
+// ─── Reusable Universal UPI Checkout Page Renderer ───────────────────────────
+function renderUpiCheckoutHtml({ orderId, order, targetApp = null }) {
+  const { upiId, merchantName, amount, upiUrl, qrCodeUrl, tr } = generateUpiDetails(order || { orderId, totalPayable: 1 });
+  const note = `Order ${orderId}`;
+  const baseQuery = `pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(merchantName)}&am=${amount}&cu=INR&tn=${encodeURIComponent(note)}&tr=${encodeURIComponent(tr || orderId.replace(/[^a-zA-Z0-9]/g, ""))}`;
+
+  const universalUpi = `upi://pay?${baseQuery}`;
+  const gpayUrl      = `tez://upi/pay?${baseQuery}`;
+  const phonepeUrl   = `intent://pay?${baseQuery}#Intent;scheme=upi;package=com.phonepe.app;end`;
+  const paytmUrl     = `intent://pay?${baseQuery}#Intent;scheme=upi;package=net.one97.paytm;end`;
+
+  let primaryTarget = universalUpi;
+  let primaryTitle  = "UPI App";
+  let primaryEmoji  = "⚡";
+
+  if (targetApp === "gpay") {
+    primaryTarget = gpayUrl;
+    primaryTitle  = "Google Pay";
+    primaryEmoji  = "🟢";
+  } else if (targetApp === "phonepe") {
+    primaryTarget = phonepeUrl;
+    primaryTitle  = "PhonePe";
+    primaryEmoji  = "🟣";
+  } else if (targetApp === "paytm") {
+    primaryTarget = paytmUrl;
+    primaryTitle  = "Paytm";
+    primaryEmoji  = "🔵";
+  }
+
+  const shouldAutoLaunch = Boolean(targetApp);
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Pay ₹${amount} - ${merchantName}</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #f0f2f5;
+      margin: 0;
+      padding: 16px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      color: #111b21;
+    }
+    .card {
+      background: #ffffff;
+      max-width: 420px;
+      width: 100%;
+      border-radius: 20px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+      overflow: hidden;
+      text-align: center;
+    }
+    .header {
+      background: linear-gradient(135deg, #075e54, #128c7e);
+      color: white;
+      padding: 24px 20px 20px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 600;
+    }
+    .header p {
+      margin: 4px 0 0;
+      font-size: 13px;
+      opacity: 0.88;
+    }
+    .content {
+      padding: 24px 20px;
+    }
+    .amount-badge {
+      display: inline-block;
+      background: #e7f8ee;
+      color: #0b8043;
+      font-size: 32px;
+      font-weight: 800;
+      padding: 8px 24px;
+      border-radius: 999px;
+      margin: 12px 0;
+      letter-spacing: -0.5px;
+    }
+    .order-meta {
+      font-size: 13px;
+      color: #667781;
+      margin-bottom: 20px;
+    }
+    .btn-main {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      background: #25d366;
+      color: #ffffff;
+      text-decoration: none;
+      font-size: 17px;
+      font-weight: 700;
+      padding: 16px 24px;
+      border-radius: 12px;
+      box-shadow: 0 4px 14px rgba(37,211,102,0.35);
+      transition: transform 0.1s ease, background 0.2s ease;
+      margin-bottom: 12px;
+    }
+    .btn-main:active {
+      transform: scale(0.98);
+      background: #1eb956;
+    }
+    .btn-secondary {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      background: #f0f2f5;
+      color: #111b21;
+      text-decoration: none;
+      font-size: 15px;
+      font-weight: 600;
+      padding: 13px 20px;
+      border-radius: 12px;
+      margin-bottom: 20px;
+      border: 1px solid #e1e4e8;
+    }
+    .btn-secondary:active {
+      background: #e4e6eb;
+    }
+    .divider {
+      display: flex;
+      align-items: center;
+      text-align: center;
+      color: #8696a0;
+      font-size: 12px;
+      margin: 18px 0;
+    }
+    .divider::before, .divider::after {
+      content: '';
+      flex: 1;
+      border-bottom: 1px solid #e1e4e8;
+    }
+    .divider:not(:empty)::before { margin-right: .8em; }
+    .divider:not(:empty)::after { margin-left: .8em; }
+    .app-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .app-pill {
+      background: #f7f9fa;
+      border: 1px solid #e9ecef;
+      padding: 10px 8px;
+      border-radius: 10px;
+      text-decoration: none;
+      color: #111b21;
+      font-size: 12px;
+      font-weight: 600;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .app-pill:active { background: #e9ecef; }
+    .upi-box {
+      background: #f8fafc;
+      border: 1px dashed #cbd5e1;
+      border-radius: 12px;
+      padding: 14px;
+      margin: 16px 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      text-align: left;
+    }
+    .upi-text {
+      font-size: 13px;
+      color: #334155;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .upi-text strong {
+      display: block;
+      color: #0f172a;
+      font-size: 14px;
+      font-family: monospace;
+      margin-top: 2px;
+    }
+    .btn-copy {
+      background: #075e54;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .qr-container {
+      margin: 16px auto;
+      padding: 12px;
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 14px;
+      display: inline-block;
+    }
+    .qr-container img {
+      width: 190px;
+      height: 190px;
+      display: block;
+    }
+    .toast {
+      display: none;
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #111b21;
+      color: white;
+      padding: 10px 20px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 500;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+      z-index: 9999;
+    }
+    .footer-hint {
+      font-size: 12px;
+      color: #8696a0;
+      line-height: 1.5;
+      margin-top: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <h1>${merchantName}</h1>
+      <p>Secure UPI Payment Checkout</p>
+    </div>
+
+    <div class="content">
+      <div class="order-meta">Order ID: <strong>#${orderId}</strong></div>
+      <div class="amount-badge">₹${amount}</div>
+
+      <!-- Primary Action Button -->
+      <a id="btnPrimary" class="btn-main" href="${primaryTarget}">
+        <span>${primaryEmoji}</span>
+        <span>Open ${primaryTitle}</span>
+      </a>
+
+      <!-- Universal Fallback Button -->
+      <a class="btn-secondary" href="${universalUpi}">
+        <span>⚡</span>
+        <span>Pay with Any UPI App</span>
+      </a>
+
+      <div class="divider">Or choose your app</div>
+
+      <!-- Direct App Selector Grid -->
+      <div class="app-grid">
+        <a class="app-pill" href="${gpayUrl}">
+          <span style="font-size: 18px;">🟢</span>
+          <span>Google Pay</span>
+        </a>
+        <a class="app-pill" href="${phonepeUrl}">
+          <span style="font-size: 18px;">🟣</span>
+          <span>PhonePe</span>
+        </a>
+        <a class="app-pill" href="${paytmUrl}">
+          <span style="font-size: 18px;">🔵</span>
+          <span>Paytm</span>
+        </a>
+      </div>
+
+      <!-- Copy UPI ID Box -->
+      <div class="upi-box">
+        <div class="upi-text">
+          <span>Payee UPI ID:</span>
+          <strong id="upiIdVal">${upiId}</strong>
+        </div>
+        <button class="btn-copy" onclick="copyUpi()">📋 Copy</button>
+      </div>
+
+      <!-- Dynamic QR Code for Scanning -->
+      <div class="qr-container">
+        <a href="${universalUpi}">
+          <img src="${qrCodeUrl}" alt="UPI QR Code" />
+        </a>
+      </div>
+      <div style="font-size: 12px; color: #667781; margin-top: -6px;">Tap QR code or scan with any UPI app</div>
+
+      <div class="footer-hint">
+        🔒 Powered by National Payments Corporation of India (NPCI)<br/>
+        After paying, return to WhatsApp to confirm delivery details.
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast">✅ UPI ID copied to clipboard!</div>
+
+  <script>
+    function copyUpi() {
+      const upi = document.getElementById("upiIdVal").innerText.trim();
+      navigator.clipboard.writeText(upi).then(function() {
+        const toast = document.getElementById("toast");
+        toast.style.display = "block";
+        setTimeout(() => { toast.style.display = "none"; }, 2500);
+      }).catch(function() {
+        prompt("Copy UPI ID:", upi);
+      });
+    }
+
+    ${shouldAutoLaunch ? `
+    // Auto-launch selected app without race conditions or timer collisions
+    window.addEventListener("DOMContentLoaded", function() {
+      setTimeout(function() {
+        try {
+          window.location.href = "${primaryTarget}";
+        } catch (_) {}
+      }, 350);
+    });
+    ` : ""}
+  </script>
+</body>
+</html>`;
+}
+
 // ─── Web Payment Checkout View (Browser preview / direct UPI link) ──────────
 app.get("/pay/:orderId", async (req, res) => {
   const { orderId } = req.params;
@@ -1418,50 +1753,7 @@ app.get("/pay/:orderId", async (req, res) => {
     };
   }
 
-  const { upiId, merchantName, amount, upiUrl, qrCodeUrl } = generateUpiDetails(order);
-
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Pay Order ${orderId} - ${merchantName}</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f0f2f5; margin: 0; padding: 20px; display: flex; justify-content: center; }
-    .card { background: white; max-width: 420px; width: 100%; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); overflow: hidden; }
-    .header { background: #075e54; color: white; padding: 20px; text-align: center; }
-    .header h2 { margin: 0; font-size: 20px; }
-    .content { padding: 24px; text-align: center; }
-    .amount { font-size: 32px; font-weight: bold; color: #128c7e; margin: 12px 0; }
-    .qr-box { margin: 16px auto; padding: 12px; background: #fff; border: 2px dashed #075e54; border-radius: 12px; display: inline-block; }
-    .qr-box img { width: 220px; height: 220px; display: block; }
-    .btn-pay { display: block; background: #25d366; color: white; text-decoration: none; padding: 14px 20px; border-radius: 8px; font-weight: bold; margin-top: 20px; font-size: 16px; }
-    .btn-pay:hover { background: #128c7e; }
-    .info { font-size: 13px; color: #667781; margin-top: 16px; line-height: 1.5; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="header">
-      <h2>${merchantName}</h2>
-      <div style="font-size: 14px; opacity: 0.9; margin-top: 4px;">WhatsApp Order Payment</div>
-    </div>
-    <div class="content">
-      <div style="color: #667781; font-size: 14px;">Order ID: <strong>${orderId}</strong></div>
-      <div class="amount">₹${amount}</div>
-      <div class="qr-box">
-        <img src="${qrCodeUrl}" alt="UPI QR Code" />
-      </div>
-      <div style="font-size: 14px; color: #333; margin-top: 8px;">Scan with <strong>Google Pay, PhonePe, Paytm, CRED</strong></div>
-      <a class="btn-pay" href="${upiUrl}">⚡ Pay with UPI App</a>
-      <div class="info">
-        UPI ID: <strong>${upiId}</strong><br/>
-        Razorpay MID: <strong>${process.env.RAZORPAY_ACCOUNT_ID || "acc_Rl7A6E91g4TV40"}</strong>
-      </div>
-    </div>
-  </div>
-</body>
-</html>`);
+  res.send(renderUpiCheckoutHtml({ orderId, order, targetApp: null }));
 });
 
 // ─── Direct UPI App Redirects (Google Pay, PhonePe, Paytm, Universal UPI) ─────
@@ -1481,58 +1773,7 @@ app.get("/pay/:app/:orderId", async (req, res) => {
     };
   }
 
-  const { upiId, merchantName, amount } = generateUpiDetails(order);
-  const note = `Order ${orderId}`;
-  const baseUpi = `pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(merchantName)}&am=${amount}&cu=INR&tn=${encodeURIComponent(note)}`;
-
-  let deepLink = `upi://pay?${baseUpi}`;
-  let appTitle = "UPI App";
-
-  if (appName === "gpay") {
-    deepLink = `tez://upi/pay?${baseUpi}`;
-    appTitle = "Google Pay";
-  } else if (appName === "phonepe") {
-    deepLink = `phonepe://pay?${baseUpi}`;
-    appTitle = "PhonePe";
-  } else if (appName === "paytm") {
-    deepLink = `paytmmp://pay?${baseUpi}`;
-    appTitle = "Paytm";
-  } else if (appName === "upi") {
-    deepLink = `upi://pay?${baseUpi}`;
-    appTitle = "UPI App";
-  }
-
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Opening ${appTitle}...</title>
-  <meta http-equiv="refresh" content="0;url=${deepLink}">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f0f2f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
-    .box { background: white; padding: 32px 24px; border-radius: 16px; text-align: center; max-width: 380px; width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
-    .btn { display: block; background: #075e54; color: white; text-decoration: none; padding: 14px 24px; border-radius: 10px; font-weight: bold; margin-top: 24px; font-size: 16px; }
-    .btn:hover { background: #128c7e; }
-  </style>
-  <script>
-    // Instantly launch target UPI app
-    window.location.href = "${deepLink}";
-    setTimeout(function() {
-      // Fallback to standard upi:// if specific app is not installed
-      window.location.href = "upi://pay?${baseUpi}";
-    }, 1500);
-  </script>
-</head>
-<body>
-  <div class="box">
-    <h3 style="margin: 0 0 8px;">Opening ${appTitle}...</h3>
-    <p style="color: #667781; font-size: 14px; margin: 0 0 16px;">Paying ₹${amount} for Order <strong>${orderId}</strong></p>
-    <a class="btn" href="${deepLink}">👉 Open ${appTitle}</a>
-    <p style="color: #888; font-size: 12px; margin-top: 20px; line-height: 1.5;">After paying, return to WhatsApp to provide your delivery address.</p>
-  </div>
-</body>
-</html>`);
+  res.send(renderUpiCheckoutHtml({ orderId, order, targetApp: appName }));
 });
 
 // ─── Razorpay Webhook Endpoint ────────────────────────────────────────────────
