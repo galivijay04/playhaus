@@ -24,7 +24,7 @@ mongoose
 // ─── Serve uploaded banners publicly (ngrok tunnels port 3000) ───────────────
 app.use("/uploads", express.static(path.join(__dirname, "admin", "uploads")));
 
-const { ACCESS_TOKEN, PHONE_NUMBER_ID, WEBHOOK_VERIFY_TOKEN, PORT = 3000, CATALOG_ID = "2192111105021785" } = process.env;
+const { ACCESS_TOKEN, PHONE_NUMBER_ID, WEBHOOK_VERIFY_TOKEN, PORT = 10000, CATALOG_ID = "2192111105021785" } = process.env;
 const GRAPH_API_URL = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
 const CONFIG_PATH   = path.join(__dirname, "config.json");
 const FLOW_PATH     = path.join(__dirname, "flow.json");
@@ -2479,8 +2479,19 @@ app.get("/api/status", (req, res) => {
   });
 });
 
-app.get("/", (req, res) => res.send("WhatsApp bot is running 🟢"));
+app.get("/", (req, res) => res.status(200).send("WhatsApp bot is running 🟢"));
 
-app.listen(PORT, () => {
-  console.log(`🚀 Bot server started on port ${PORT}`);
+const primaryPort = Number(process.env.PORT) || 10000;
+
+app.listen(primaryPort, "0.0.0.0", () => {
+  console.log(`🚀 Bot server started on port ${primaryPort} (0.0.0.0)`);
 });
+
+// Dual-port listening: Also listen on port 3000 if primary port is 10000 (or vice versa)
+// Guarantees that whether Render probes 10000 or 3000, it receives an immediate response
+const secondaryPort = primaryPort === 10000 ? 3000 : 10000;
+try {
+  app.listen(secondaryPort, "0.0.0.0", () => {
+    console.log(`🚀 Secondary listener active on port ${secondaryPort} (0.0.0.0)`);
+  });
+} catch (_) {}
