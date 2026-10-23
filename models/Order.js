@@ -38,6 +38,10 @@ const orderSchema = new mongoose.Schema(
     isPaid: { type: Boolean, default: false, index: true },
     paidAt: { type: Date, default: null },
     location: { type: locationSchema, default: null },
+    trackingNumber: { type: String, default: "" },
+    courier: { type: String, default: "BlueDart / Delhivery" },
+    trackingUrl: { type: String, default: "" },
+    statusUpdate: { type: String, default: "" },
     step: {
       type: String,
       enum: [
@@ -45,6 +49,10 @@ const orderSchema = new mongoose.Schema(
         "AWAITING_PAYMENT_VERIFICATION",
         "AWAITING_LOCATION",
         "ORDER_CONFIRMED",
+        "PREPARING",
+        "SHIPPED",
+        "OUT_FOR_DELIVERY",
+        "DELIVERED",
         "CANCELLED",
       ],
       default: "AWAITING_PAYMENT",

@@ -4,8 +4,9 @@ const axios    = require("axios");
 const fs       = require("fs");
 const path     = require("path");
 const mongoose = require("mongoose");
-const Order    = require("./models/Order");
-const UserSession = require("./models/UserSession");
+const Order         = require("./models/Order");
+const UserSession   = require("./models/UserSession");
+const SupportTicket = require("./models/SupportTicket");
 
 const app = express();
 app.use(express.json());
@@ -30,6 +31,7 @@ const FLOW_PATH     = path.join(__dirname, "flow.json");
 const FLOW_ID       = "1090157514003637";
 const userCarts     = {};
 const userOrders    = {};
+const userSessions  = {};
 
 // ─── Database Sync Helpers ──────────────────────────────────────────────────
 async function syncOrderToDb(sender, order) {
@@ -51,14 +53,29 @@ async function syncOrderToDb(sender, order) {
       paidAt: order.paidAt ? new Date(order.paidAt) : null,
       location: order.location || null,
       step: order.step || "AWAITING_PAYMENT",
+      trackingNumber: order.trackingNumber || "",
+      courier: order.courier || "BlueDart / Delhivery",
+      trackingUrl: order.trackingUrl || "",
+      statusUpdate: order.statusUpdate || "",
     };
 
-    await Order.findOneAndUpdate(
+    const saved = await Order.findOneAndUpdate(
       { orderId: order.orderId },
       { $set: orderDoc },
       { upsert: true, returnDocument: "after" }
     );
     console.log(`💾 Order ${order.orderId} synced to MongoDB Atlas.`);
+
+    // Keep UserSession active
+    try {
+      await UserSession.findOneAndUpdate(
+        { phone: sender },
+        { $set: { activeOrderId: order.orderId, lastActiveAt: new Date() } },
+        { upsert: true }
+      );
+    } catch (_) {}
+
+    return saved;
   } catch (err) {
     console.error(`⚠️ Error syncing order ${order.orderId} to MongoDB:`, err.message);
   }
@@ -77,6 +94,68 @@ async function getActiveOrder(sender) {
     console.error("⚠️ Error retrieving order from MongoDB:", err.message);
   }
   return null;
+}
+
+// ─── Database Order Search for Tracking (Exact ID, Regex, or Phone) ───────────
+async function findOrderByIdOrSender(queryText, sender) {
+  try {
+    if (queryText) {
+      const clean = String(queryText).trim().replace(/^#/, "");
+
+      // 1. Direct exact orderId match
+      let order = await Order.findOne({ orderId: clean });
+      if (order) return order.toObject();
+
+      // 2. Case-insensitive exact match
+      order = await Order.findOne({ orderId: new RegExp(`^${clean}$`, "i") });
+      if (order) return order.toObject();
+
+      // 3. Match Order ID pattern (e.g. PH-B2C-XXXX or part of it)
+      const match = clean.match(/(?:PH-B2C-|PH-)?([A-Z0-9]{4,10})/i);
+      if (match) {
+        order = await Order.findOne({ orderId: new RegExp(match[0], "i") });
+        if (order) return order.toObject();
+        order = await Order.findOne({ orderId: new RegExp(match[1], "i") });
+        if (order) return order.toObject();
+      }
+
+      // 4. Match 10+ digit mobile number
+      const digits = clean.replace(/\D/g, "");
+      if (digits.length >= 10) {
+        order = await Order.findOne({ sender: new RegExp(digits.slice(-10)) }).sort({ createdAt: -1 });
+        if (order) return order.toObject();
+      }
+    }
+
+    // 5. Look up latest order for current sender WhatsApp number
+    if (sender) {
+      const order = await Order.findOne({ sender }).sort({ createdAt: -1 });
+      if (order) return order.toObject();
+    }
+  } catch (err) {
+    console.error("⚠️ Error finding order in MongoDB:", err.message);
+  }
+  return null;
+}
+
+// ─── Log Customer Support Inquiries to MongoDB ────────────────────────────────
+async function logSupportTicket(sender, customerName, message, linkedOrderId = null) {
+  try {
+    const ticketId = `TKT-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+    const ticket = await SupportTicket.create({
+      ticketId,
+      sender,
+      customerName: customerName || "Customer",
+      message,
+      linkedOrderId,
+      status: "OPEN",
+    });
+    console.log(`🎫 Support ticket ${ticketId} created in MongoDB for ${sender}`);
+    return ticket;
+  } catch (err) {
+    console.error("⚠️ Error logging support ticket:", err.message);
+    return null;
+  }
 }
 
 // ─── Always read fresh config ─────────────────────────────────────────────────
@@ -844,7 +923,8 @@ async function sendOrderConfirmed(to, order, customerName = "Friend") {
   const bannerUrl = getBannerUrl();
   console.log(`🎉 Sending order confirmation to ${to}...`);
 
-  const trackingUrl = `https://www.playhausgames.com/track?order=${order.orderId}`;
+  const baseUrl = getPublicBaseUrl();
+  const trackingUrl = `${baseUrl}/track/${order.orderId}`;
   const bodyText =
     `✅ *Order Confirmed! Thank you, ${customerName}!*\n\n` +
     `*Order ID:* ${order.orderId}\n` +
@@ -906,6 +986,166 @@ async function sendOrderConfirmed(to, order, customerName = "Friend") {
     } catch (_) {
       await sendText(to, `${bodyText}\n\n🔗 Track your order: ${trackingUrl}`);
     }
+  }
+}
+
+// ─── Send Rich Interactive Order Tracking Card ──────────────────────────────
+async function sendOrderTrackingCard(to, order) {
+  const bannerUrl = getBannerUrl();
+  console.log(`📦 Sending live tracking card for Order ${order.orderId} to ${to}...`);
+
+  const itemsList = (order.items || [])
+    .map((it) => `• *${it.name}* × ${it.qty || 1} (₹${it.price || 1})`)
+    .join("\n") || "• Snap Magnet × 1 (₹1)";
+
+  const dateStr = order.createdAt
+    ? new Date(order.createdAt).toLocaleDateString("en-IN", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "Recently placed";
+
+  let statusText = "🟢 Confirmed & Preparing for Dispatch";
+  let statusVisual = "━━━━━━━━━━━━━━○───────\n📦 Confirmed ➔ 🚚 Shipped ➔ 🏡 Delivered";
+
+  if (order.step === "AWAITING_PAYMENT") {
+    statusText = "⏳ Awaiting Payment";
+    statusVisual = "○─────────────────────\n💳 Pay Now ➔ 📦 Confirmed ➔ 🏡 Delivered";
+  } else if (order.step === "AWAITING_LOCATION") {
+    statusText = "📍 Payment Received — Waiting for Delivery Address";
+    statusVisual = "━━━━━━━○──────────────\n💳 Paid ➔ 📍 Address ➔ 🏡 Delivered";
+  } else if (order.step === "SHIPPED") {
+    statusText = `🚚 Shipped via ${order.courier || "Delhivery"}`;
+    if (order.trackingNumber) statusText += `\n📦 *AWB / Tracking #:* \`${order.trackingNumber}\``;
+    statusVisual = "━━━━━━━━━━━━━━━━━━━━○─\n📦 Confirmed ➔ 🚚 Shipped ➔ 🏡 Delivered";
+  } else if (order.step === "OUT_FOR_DELIVERY") {
+    statusText = "🛵 Out for Delivery Today!";
+    statusVisual = "━━━━━━━━━━━━━━━━━━━━━━\n🚚 Shipped ➔ 🛵 Out for Delivery ➔ 🏡 Delivered";
+  } else if (order.step === "DELIVERED") {
+    statusText = "🎉 Delivered Successfully!";
+    statusVisual = "━━━━━━━━━━━━━━━━━━━━━━\n📦 Confirmed ➔ 🚚 Shipped ➔ 🏡 Delivered ✅";
+  }
+
+  const addressDisplay = order.location?.address
+    ? order.location.address
+    : order.location
+    ? "📍 Live GPS Location Saved"
+    : "_Address not shared yet_";
+
+  const paymentDisplay = order.isPaid
+    ? `Paid via ${order.paymentMethod || "UPI"} ✅`
+    : order.paymentMethod === "Cash on Delivery"
+    ? "Cash on Delivery 💵"
+    : "Payment Pending ⏳";
+
+  const cardBody =
+    `📦 *ORDER TRACKING DETAILS*\n` +
+    `─────────────────────\n` +
+    `🧾 *Order ID:* \`${order.orderId}\`\n` +
+    `📅 *Order Date:* ${dateStr}\n` +
+    `👤 *Customer:* ${order.customerName || "Customer"}\n\n` +
+    `🎮 *Items Ordered:*\n` +
+    `${itemsList}\n\n` +
+    `💰 *Total Amount:* ₹${order.totalPayable} (${paymentDisplay})\n` +
+    `📍 *Delivery Address:*\n${addressDisplay}\n\n` +
+    `🚚 *Current Status:*\n` +
+    `*${statusText}*\n` +
+    `\`${statusVisual}\`\n\n` +
+    `📅 *Expected Delivery:* ${order.expectedDelivery || "Within 3–5 business days"}\n\n` +
+    `_Need any changes or help? Tap Support below!_`;
+
+  const buttons = [
+    { type: "reply", reply: { id: "btn_support", title: "🎧 Support" } },
+    { type: "reply", reply: { id: "btn_catalog", title: "🛍️ View Games" } },
+  ];
+
+  if (order.step === "AWAITING_PAYMENT" && !order.isPaid) {
+    buttons.unshift({ type: "reply", reply: { id: "pay_online", title: "⚡ Pay Now" } });
+  }
+
+  try {
+    await axios.post(
+      GRAPH_API_URL,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "button",
+          header: {
+            type: "image",
+            image: { link: bannerUrl },
+          },
+          body: { text: cardBody },
+          footer: { text: "Playhaus Games • Order Tracking" },
+          action: { buttons: buttons.slice(0, 3) },
+        },
+      },
+      { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+    );
+    console.log(`✅ Tracking card sent for ${order.orderId} to ${to}`);
+    return true;
+  } catch (err) {
+    console.error("❌ sendOrderTrackingCard FAILED:", JSON.stringify(err?.response?.data || err.message, null, 2));
+    await sendText(to, cardBody);
+    return false;
+  }
+}
+
+// ─── Send Customer Support Menu ───────────────────────────────────────────────
+async function sendCustomerSupportMenu(to) {
+  const bannerUrl = getBannerUrl();
+  console.log(`🎧 Sending Customer Support menu to ${to}...`);
+
+  const bodyText =
+    `🎧 *Playhaus Customer Care*\n` +
+    `─────────────────────\n` +
+    `Welcome! We're here to help you with orders, delivery, game queries, and replacements. 😊\n\n` +
+    `📞 *Direct Helpline:* +91 6364936004\n` +
+    `💬 *WhatsApp Hours:* Mon–Sat, 10:00 AM – 6:00 PM\n` +
+    `📧 *Email:* care@playhaus.in\n` +
+    `🌐 *Website:* playhausgames.com\n\n` +
+    `*How can we assist you today?*\n` +
+    `• Reply with your question or concern directly here\n` +
+    `• Or tap an option below: 👇`;
+
+  try {
+    await axios.post(
+      GRAPH_API_URL,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "button",
+          header: {
+            type: "image",
+            image: { link: bannerUrl },
+          },
+          body: { text: bodyText },
+          footer: { text: "Playhaus Support • Fast Resolution" },
+          action: {
+            buttons: [
+              { type: "reply", reply: { id: "btn_track_order", title: "📦 Track Order" } },
+              { type: "reply", reply: { id: "btn_talk_agent", title: "💬 Leave a Message" } },
+              { type: "reply", reply: { id: "btn_catalog", title: "🛍️ View Games" } },
+            ],
+          },
+        },
+      },
+      { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+    );
+    console.log(`✅ Support menu sent to ${to}`);
+    return true;
+  } catch (err) {
+    console.error("❌ sendCustomerSupportMenu FAILED:", JSON.stringify(err?.response?.data || err.message, null, 2));
+    await sendText(to, `${bodyText}\n\n👉 Reply directly to chat with support!`);
+    return false;
   }
 }
 
@@ -1027,19 +1267,26 @@ async function handleFlowResponse(sender, responseData) {
 
   // ── Track Order ────────────────────────────────────────────────────────────
   if (service === "track_order") {
+    const order = await findOrderByIdOrSender(null, sender);
+    if (order) {
+      await sendOrderTrackingCard(sender, order);
+      return;
+    }
     await sendText(
       sender,
-      `📦 *Track Your Order*\n\nPlease share:\n• Your Order ID\n• Registered mobile number\n\nOur team will update you within 24 hours. ⏰`
+      `📦 *Track Your Order*\n\n` +
+      `We checked our database, but didn't find any recent orders placed from this WhatsApp number (*+${sender}*).\n\n` +
+      `🔎 *Have an Order ID?*\n` +
+      `Simply reply with your Order ID (e.g. *PH-B2C-XXXXX*) or registered 10-digit mobile number, and we'll pull up your tracking details right away!`
     );
+    userSessions[sender] = { state: "AWAITING_TRACKING_QUERY" };
     return;
   }
 
   // ── Customer Support ───────────────────────────────────────────────────────
   if (service === "customer_support") {
-    await sendText(
-      sender,
-      `🎧 *Customer Support*\n\nWe're here to help! 😊\n\n📞 +91 6364936004\n📧 care@playhaus.in\n🕐 Mon–Sat, 10am–6pm\n\nOr just reply with your issue and we'll get back to you!`
-    );
+    await sendCustomerSupportMenu(sender);
+    userSessions[sender] = { state: "AWAITING_SUPPORT_MESSAGE" };
     return;
   }
 
@@ -1098,7 +1345,7 @@ app.post("/webhook", async (req, res) => {
 
       // Payment option selected (Image 3)
       if (replyId === "pay_online" || replyId === "pay_cod") {
-        let existingOrder = userOrders[sender];
+        let existingOrder = await getActiveOrder(sender);
         if (!existingOrder) {
           const cfg = getConfig();
           const p = cfg.products?.[0] || { name: "Snap Magnet", price: "Rs.1", imageUrl: "https://cdn.shopify.com/s/files/1/0726/2676/6011/files/pdp-snap-magnet-3.webp?v=1785878825" };
@@ -1150,7 +1397,7 @@ app.post("/webhook", async (req, res) => {
       // App selection button clicked on the QR card
       if (replyId?.startsWith("pay_app_")) {
         const appChoice = replyId.replace("pay_app_", ""); // "gpay", "phonepe", "paytm", "upi"
-        const existingOrder = userOrders[sender] || {
+        const existingOrder = (await getActiveOrder(sender)) || {
           orderId: `PH-B2C-${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
           totalPayable: 1,
         };
@@ -1160,13 +1407,45 @@ app.post("/webhook", async (req, res) => {
 
       if (replyId?.startsWith("track_")) {
         const orderId = replyId.replace("track_", "");
-        await sendText(
-          sender,
-          `📦 *Order Status: ${orderId}*\n\n` +
-          `• Status: *Confirmed & Preparing for Dispatch* 🚚\n` +
-          `• Expected Delivery: *Within 3–5 business days*\n\n` +
-          `📞 Customer Care: +91 6364936004`
-        );
+        const order = await findOrderByIdOrSender(orderId, sender);
+        if (order) {
+          await sendOrderTrackingCard(sender, order);
+        } else {
+          await sendText(
+            sender,
+            `📦 *Order Status: ${orderId}*\n\n` +
+            `• Status: *Confirmed & Preparing for Dispatch* 🚚\n` +
+            `• Expected Delivery: *Within 3–5 business days*\n\n` +
+            `📞 Customer Care: +91 6364936004`
+          );
+        }
+        return;
+      }
+
+      if (replyId === "btn_track_order") {
+        const order = await findOrderByIdOrSender(null, sender);
+        if (order) {
+          await sendOrderTrackingCard(sender, order);
+        } else {
+          await sendText(
+            sender,
+            `📦 *Track Your Order*\n\n` +
+            `Please reply with your *Order ID* (e.g. *PH-B2C-XXXXX*) or registered 10-digit mobile number, and we'll pull up your details! 🔎\n\n` +
+            `📞 Support: +91 6364936004`
+          );
+          userSessions[sender] = { state: "AWAITING_TRACKING_QUERY" };
+        }
+        return;
+      }
+
+      if (replyId === "btn_support" || replyId === "btn_talk_agent") {
+        await sendCustomerSupportMenu(sender);
+        userSessions[sender] = { state: "AWAITING_SUPPORT_MESSAGE" };
+        return;
+      }
+
+      if (replyId === "btn_catalog" || replyId === "btn_browse_games") {
+        await sendCatalog(sender);
         return;
       }
     }
@@ -1192,7 +1471,7 @@ app.post("/webhook", async (req, res) => {
       const loc = msg.location;
       console.log("📍 Location received:", JSON.stringify(loc));
 
-      const existingOrder = userOrders[sender];
+      const existingOrder = await getActiveOrder(sender);
       const customerName =
         body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.profile?.name ||
         existingOrder?.customerName ||
@@ -1310,8 +1589,89 @@ app.post("/webhook", async (req, res) => {
       const bodyText = (msg.text?.body || "").trim();
       const lower = bodyText.toLowerCase();
 
+      // Retrieve customer's active order directly from MongoDB (survives restarts)
+      const existingOrder = await getActiveOrder(sender);
+
+      // ── Check if user is leaving a support message ────────────────────────
+      if (userSessions[sender]?.state === "AWAITING_SUPPORT_MESSAGE") {
+        userSessions[sender].state = null;
+        const customerName =
+          body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.profile?.name ||
+          existingOrder?.customerName ||
+          "Customer";
+        const ticket = await logSupportTicket(sender, customerName, bodyText, existingOrder?.orderId);
+        const ticketId = ticket?.ticketId || `TKT-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+
+        await sendText(
+          sender,
+          `✅ *Support Ticket Created (#${ticketId})*\n\n` +
+          `Thank you for messaging us, *${customerName}*! We have received your query:\n\n` +
+          `> "${bodyText}"\n\n` +
+          `Our support team has been notified and will reply right here on WhatsApp within business hours (Mon–Sat, 10am–6pm). ⏰\n\n` +
+          `📞 For urgent escalations, call us directly at *+91 6364936004*.`
+        );
+        return;
+      }
+
+      // ── Check if user triggers Customer Support ────────────────────────────
+      const isSupportKeyword =
+        lower === "help" ||
+        lower === "support" ||
+        lower.includes("customer care") ||
+        lower.includes("customer support") ||
+        lower.includes("contact") ||
+        lower.includes("helpline") ||
+        lower.includes("agent") ||
+        lower.includes("executive") ||
+        lower.includes("talk to human") ||
+        lower.includes("complaint") ||
+        lower.includes("refund") ||
+        lower.includes("return") ||
+        lower.includes("damaged") ||
+        lower.includes("broken") ||
+        lower.includes("wrong item");
+
+      if (isSupportKeyword) {
+        console.log(`🎧 Support keyword detected from ${sender}: "${bodyText}"`);
+        await sendCustomerSupportMenu(sender);
+        userSessions[sender] = { state: "AWAITING_SUPPORT_MESSAGE" };
+        return;
+      }
+
+      // ── Check if user triggers Order Tracking or typed an Order ID ─────────
+      const isOrderIdDirect = /^(?:#)?(?:PH-)?(?:B2C-)?[A-Z0-9]{4,10}$/i.test(bodyText.trim());
+      const isTrackKeyword =
+        lower.includes("track") ||
+        lower.includes("status") ||
+        lower.includes("where is my order") ||
+        lower.includes("where is my package") ||
+        lower.includes("tracking") ||
+        lower.includes("dispatch") ||
+        lower.includes("delivery date") ||
+        userSessions[sender]?.state === "AWAITING_TRACKING_QUERY";
+
+      if (isOrderIdDirect || isTrackKeyword) {
+        if (userSessions[sender]) userSessions[sender].state = null;
+        console.log(`📦 Order tracking requested by ${sender} (Query: "${bodyText}")`);
+        const order = await findOrderByIdOrSender(bodyText, sender);
+        if (order) {
+          await sendOrderTrackingCard(sender, order);
+          return;
+        } else {
+          await sendText(
+            sender,
+            `🔍 *Order Not Found*\n\n` +
+            `We couldn't find an order matching *"${bodyText}"* or linked to your WhatsApp number (*+${sender}*).\n\n` +
+            `• Please check your Order ID (format: *PH-B2C-XXXXX*)\n` +
+            `• If you used a different mobile number when placing the order, reply with that 10-digit number.\n\n` +
+            `📞 Need immediate assistance? Reply *support* or call *+91 6364936004*.`
+          );
+          userSessions[sender] = { state: "AWAITING_TRACKING_QUERY" };
+          return;
+        }
+      }
+
       // Check if user is waiting to choose payment and typed text
-      const existingOrder = userOrders[sender];
       if (existingOrder && existingOrder.step === "AWAITING_PAYMENT") {
         if (lower.includes("online") || lower.includes("upi") || lower.includes("pay") || lower.includes("card")) {
           existingOrder.paymentMethod = "Online (UPI - Razorpay)";
@@ -1376,28 +1736,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Track order command
-      if (lower.includes("track") || lower.includes("status")) {
-        const order = userOrders[sender];
-        if (order) {
-          await sendText(
-            sender,
-            `📦 *Order Status: ${order.orderId}*\n\n` +
-            `• Items: ${order.items?.map((it) => it.name).join(", ") || "Playhaus Games"}\n` +
-            `• Total: Rs.${order.totalPayable}\n` +
-            `• Payment: *${order.paymentMethod || "Pending"}*\n` +
-            `• Status: *Confirmed & Preparing for Dispatch* 🚚\n` +
-            `• Expected Delivery: *${order.expectedDelivery}*\n\n` +
-            `📞 Customer Care: +91 6364936004\n📧 care@playhaus.in`
-          );
-        } else {
-          await sendText(
-            sender,
-            `📦 *Track Your Order*\n\nPlease share your Order ID or registered mobile number.\n\nOur team will update you within 24 hours. ⏰\n\n📞 +91 6364936004\n📧 care@playhaus.in`
-          );
-        }
-        return;
-      }
 
       // Catalog / Games command
       if (
@@ -1886,6 +2224,233 @@ app.get("/api/orders/:orderId", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ─── API to Update Order Status (Admin / Logistics) ───────────────────────────
+app.post("/api/orders/:orderId/status", async (req, res) => {
+  const { orderId } = req.params;
+  const { step, trackingNumber, courier, trackingUrl, statusUpdate, notifyCustomer } = req.body;
+  try {
+    const updateDoc = {};
+    if (step) updateDoc.step = step;
+    if (trackingNumber !== undefined) updateDoc.trackingNumber = trackingNumber;
+    if (courier !== undefined) updateDoc.courier = courier;
+    if (trackingUrl !== undefined) updateDoc.trackingUrl = trackingUrl;
+    if (statusUpdate !== undefined) updateDoc.statusUpdate = statusUpdate;
+
+    const order = await Order.findOneAndUpdate(
+      { orderId },
+      { $set: updateDoc },
+      { new: true }
+    );
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    // Update in-memory cache if active
+    if (userOrders[order.sender]) {
+      userOrders[order.sender] = { ...userOrders[order.sender], ...order.toObject() };
+    }
+
+    // Optionally notify customer on WhatsApp
+    if (notifyCustomer && order.sender) {
+      await sendOrderTrackingCard(order.sender, order.toObject());
+    }
+
+    res.json({ success: true, order });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── API to View Customer Support Tickets from MongoDB ────────────────────────
+app.get("/api/support-tickets", async (req, res) => {
+  try {
+    const tickets = await SupportTicket.find().sort({ createdAt: -1 }).limit(100);
+    res.json({ count: tickets.length, tickets });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Web Order Tracking View (Browser preview / shareable tracking page) ─────
+app.get("/track/:orderId", async (req, res) => {
+  const { orderId } = req.params;
+  let order = await findOrderByIdOrSender(orderId, null);
+  if (!order) {
+    return res.status(404).send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Order Not Found - Playhaus Games</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f0f2f5; margin: 0; padding: 24px; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    .card { background: white; max-width: 440px; width: 100%; border-radius: 20px; box-shadow: 0 8px 30px rgba(0,0,0,0.06); padding: 32px 24px; text-align: center; }
+    .icon { font-size: 48px; margin-bottom: 16px; }
+    h2 { margin: 0 0 8px; color: #111b21; }
+    p { color: #667781; font-size: 14px; margin: 0 0 24px; line-height: 1.5; }
+    .btn { display: inline-block; background: #075e54; color: white; text-decoration: none; padding: 12px 24px; border-radius: 10px; font-weight: 600; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">🔍</div>
+    <h2>Order Not Found</h2>
+    <p>We couldn't find an order with ID <strong>#${orderId}</strong>. Please check the order number or contact our support team.</p>
+    <a class="btn" href="https://wa.me/916364936004?text=Hi%2C%20I%20need%20help%20tracking%20my%20order">💬 Contact Support</a>
+  </div>
+</body>
+</html>`);
+  }
+
+  const dateStr = order.createdAt
+    ? new Date(order.createdAt).toLocaleDateString("en-IN", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "Recently placed";
+
+  let stepIndex = 1;
+  let statusBadge = "Confirmed & Preparing for Dispatch 📦";
+  let statusDesc = "Our team is packing your Playhaus games for courier pickup.";
+
+  if (order.step === "AWAITING_PAYMENT") {
+    stepIndex = 0;
+    statusBadge = "Payment Pending ⏳";
+    statusDesc = "Please complete your payment to proceed with dispatch.";
+  } else if (order.step === "AWAITING_LOCATION") {
+    stepIndex = 1;
+    statusBadge = "Waiting for Address 📍";
+    statusDesc = "Payment received! Please share your delivery address on WhatsApp.";
+  } else if (order.step === "SHIPPED") {
+    stepIndex = 2;
+    statusBadge = "In Transit 🚚";
+    statusDesc = `Your parcel has been handed over to ${order.courier || "Delhivery"}.`;
+  } else if (order.step === "OUT_FOR_DELIVERY") {
+    stepIndex = 2;
+    statusBadge = "Out for Delivery 🛵";
+    statusDesc = "Your order will be delivered to your doorstep today!";
+  } else if (order.step === "DELIVERED") {
+    stepIndex = 3;
+    statusBadge = "Delivered 🎉";
+    statusDesc = "Your order was successfully delivered. Happy playing!";
+  }
+
+  const itemsHtml = (order.items || [])
+    .map(
+      (it) => `
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid #f0f2f5;">
+      <div>
+        <div style="font-weight:600; font-size:14px; color:#111b21;">${it.name}</div>
+        <div style="font-size:12px; color:#667781;">Qty: ${it.qty || 1}</div>
+      </div>
+      <div style="font-weight:700; font-size:14px; color:#0b8043;">₹${Number(it.price || 1) * Number(it.qty || 1)}</div>
+    </div>`
+    )
+    .join("");
+
+  const addressText = order.location?.address || (order.location ? "Live GPS Location saved" : "Pending location");
+
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Track Order #${order.orderId} - Playhaus Games</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f0f2f5; margin: 0; padding: 16px; display: flex; justify-content: center; }
+    .card { background: white; max-width: 480px; width: 100%; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.06); overflow: hidden; }
+    .header { background: linear-gradient(135deg, #075e54, #128c7e); color: white; padding: 24px 20px; text-align: center; }
+    .header h1 { margin: 0; font-size: 20px; font-weight: 700; }
+    .header p { margin: 4px 0 0; font-size: 13px; opacity: 0.9; }
+    .content { padding: 24px 20px; }
+    .status-card { background: #e7f8ee; border-radius: 14px; padding: 16px; margin-bottom: 24px; text-align: center; }
+    .status-badge { display: inline-block; font-size: 15px; font-weight: 800; color: #0b8043; margin-bottom: 6px; }
+    .status-desc { font-size: 13px; color: #334155; margin: 0; }
+    .stepper { display: flex; justify-content: space-between; position: relative; margin: 28px 0 32px; }
+    .stepper::before { content: ''; position: absolute; top: 16px; left: 24px; right: 24px; height: 3px; background: #e2e8f0; z-index: 1; }
+    .step { position: relative; z-index: 2; text-align: center; width: 25%; }
+    .step-circle { width: 32px; height: 32px; border-radius: 50%; background: #e2e8f0; color: #64748b; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; margin: 0 auto 8px; }
+    .step.active .step-circle { background: #075e54; color: white; box-shadow: 0 0 0 4px #e7f8ee; }
+    .step.done .step-circle { background: #25d366; color: white; }
+    .step-label { font-size: 11px; font-weight: 600; color: #64748b; }
+    .step.active .step-label { color: #075e54; font-weight: 700; }
+    .box { background: #f8fafc; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+    .box-title { font-size: 12px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+    .btn-wa { display: flex; align-items: center; justify-content: center; gap: 8px; background: #25d366; color: white; text-decoration: none; padding: 14px 20px; border-radius: 12px; font-weight: 700; font-size: 15px; box-shadow: 0 4px 14px rgba(37,211,102,0.35); margin-top: 24px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <h1>Playhaus Games</h1>
+      <p>Order Tracking Portal</p>
+    </div>
+    <div class="content">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <div>
+          <div style="font-size:12px; color:#64748b;">Order Number</div>
+          <div style="font-size:18px; font-weight:800; color:#111b21;">#${order.orderId}</div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:12px; color:#64748b;">Date Placed</div>
+          <div style="font-size:13px; font-weight:600; color:#111b21;">${dateStr}</div>
+        </div>
+      </div>
+
+      <div class="status-card">
+        <div class="status-badge">${statusBadge}</div>
+        <p class="status-desc">${statusDesc}</p>
+        ${order.trackingNumber ? `<div style="font-size:12px; font-weight:600; margin-top:8px; color:#0f172a;">Courier: ${order.courier || "Delhivery"} • AWB: ${order.trackingNumber}</div>` : ""}
+      </div>
+
+      <!-- Visual Step Progress -->
+      <div class="stepper">
+        <div class="step ${stepIndex >= 0 ? (stepIndex > 0 ? "done" : "active") : ""}">
+          <div class="step-circle">${stepIndex > 0 ? "✓" : "1"}</div>
+          <div class="step-label">Placed</div>
+        </div>
+        <div class="step ${stepIndex >= 1 ? (stepIndex > 1 ? "done" : "active") : ""}">
+          <div class="step-circle">${stepIndex > 1 ? "✓" : "2"}</div>
+          <div class="step-label">Confirmed</div>
+        </div>
+        <div class="step ${stepIndex >= 2 ? (stepIndex > 2 ? "done" : "active") : ""}">
+          <div class="step-circle">${stepIndex > 2 ? "✓" : "3"}</div>
+          <div class="step-label">Shipped</div>
+        </div>
+        <div class="step ${stepIndex >= 3 ? "active done" : ""}">
+          <div class="step-circle">4</div>
+          <div class="step-label">Delivered</div>
+        </div>
+      </div>
+
+      <!-- Items Ordered -->
+      <div class="box">
+        <div class="box-title">Items Ordered</div>
+        ${itemsHtml}
+        <div style="display:flex; justify-content:space-between; margin-top:12px; padding-top:10px; border-top:1px dashed #cbd5e1; font-weight:700;">
+          <span>Total Paid</span>
+          <span style="color:#0b8043;">₹${order.totalPayable}</span>
+        </div>
+      </div>
+
+      <!-- Delivery Address -->
+      <div class="box">
+        <div class="box-title">Delivery Details</div>
+        <div style="font-size:13px; color:#1e293b; line-height:1.5;">${addressText}</div>
+        <div style="font-size:12px; color:#64748b; margin-top:6px;">Expected by: <strong>${order.expectedDelivery || "Within 3–5 business days"}</strong></div>
+      </div>
+
+      <a class="btn-wa" href="https://wa.me/916364936004?text=Hi%2C%20I%20have%20a%20question%20about%20Order%20${order.orderId}">
+        💬 Chat with Customer Support
+      </a>
+    </div>
+  </div>
+</body>
+</html>`);
 });
 
 // ─── Bot Health & Integration Status ──────────────────────────────────────────
