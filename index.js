@@ -1161,9 +1161,36 @@ async function handleFlowResponse(sender, responseData) {
   const cartAction       = responseData?.cart_action   || "order";
   const specialNote      = responseData?.special_note  || "";
 
-  console.log(`🎯 Service: ${service} | Action: ${action} | Selected:`, selectedProducts);
+  console.log(`🎯 Service selected: ${service} | Action: ${action} | Selected:`, selectedProducts);
 
-  // ── Multi-product Selection from Flow ─────────────────────────────────────
+  // ── 1. Priority Service Routing: Track Order ─────────────────────────────
+  if (service === "track_order") {
+    console.log(`📦 Handling Track Order service request from ${sender}`);
+    const order = await findOrderByIdOrSender(null, sender);
+    if (order) {
+      await sendOrderTrackingCard(sender, order);
+      return;
+    }
+    await sendText(
+      sender,
+      `📦 *Track Your Order*\n\n` +
+      `We checked our database, but didn't find any recent orders placed from this WhatsApp number (*+${sender}*).\n\n` +
+      `🔎 *Have an Order ID?*\n` +
+      `Simply reply with your Order ID (e.g. *PH-B2C-XXXXX*) or registered 10-digit mobile number, and we'll pull up your tracking details right away!`
+    );
+    userSessions[sender] = { state: "AWAITING_TRACKING_QUERY" };
+    return;
+  }
+
+  // ── 2. Priority Service Routing: Customer Support ────────────────────────
+  if (service === "customer_support") {
+    console.log(`🎧 Handling Customer Support service request from ${sender}`);
+    await sendCustomerSupportMenu(sender);
+    userSessions[sender] = { state: "AWAITING_SUPPORT_MESSAGE" };
+    return;
+  }
+
+  // ── 3. Multi-product Selection from Flow (Place Order) ───────────────────
   if (selectedProducts) {
     let productIds = [];
     if (Array.isArray(selectedProducts)) {
@@ -1198,13 +1225,13 @@ async function handleFlowResponse(sender, responseData) {
     }
   }
 
-  // ── Place Order / Explore Games from Flow → Send Native Catalog ───────────
+  // ── 4. Place Order / Explore Games from Flow → Send Native Catalog ────────
   if (service === "place_order" && !productId && !selectedProducts) {
     await sendCatalog(sender);
     return;
   }
 
-  // ── Cart / Order Action ────────────────────────────────────────────────────
+  // ── 5. Cart / Order Action ────────────────────────────────────────────────
   if (productId) {
     const cfg   = getConfig();
     const found = cfg.products.find(
@@ -1262,31 +1289,6 @@ async function handleFlowResponse(sender, responseData) {
     await syncOrderToDb(sender, userOrders[sender]);
 
     await sendPaymentOptions(sender, userOrders[sender]);
-    return;
-  }
-
-  // ── Track Order ────────────────────────────────────────────────────────────
-  if (service === "track_order") {
-    const order = await findOrderByIdOrSender(null, sender);
-    if (order) {
-      await sendOrderTrackingCard(sender, order);
-      return;
-    }
-    await sendText(
-      sender,
-      `📦 *Track Your Order*\n\n` +
-      `We checked our database, but didn't find any recent orders placed from this WhatsApp number (*+${sender}*).\n\n` +
-      `🔎 *Have an Order ID?*\n` +
-      `Simply reply with your Order ID (e.g. *PH-B2C-XXXXX*) or registered 10-digit mobile number, and we'll pull up your tracking details right away!`
-    );
-    userSessions[sender] = { state: "AWAITING_TRACKING_QUERY" };
-    return;
-  }
-
-  // ── Customer Support ───────────────────────────────────────────────────────
-  if (service === "customer_support") {
-    await sendCustomerSupportMenu(sender);
-    userSessions[sender] = { state: "AWAITING_SUPPORT_MESSAGE" };
     return;
   }
 
@@ -1422,7 +1424,7 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      if (replyId === "btn_track_order") {
+      if (replyId === "btn_track_order" || replyId === "track_order") {
         const order = await findOrderByIdOrSender(null, sender);
         if (order) {
           await sendOrderTrackingCard(sender, order);
@@ -1438,22 +1440,49 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      if (replyId === "btn_support" || replyId === "btn_talk_agent") {
+      if (replyId === "btn_support" || replyId === "btn_talk_agent" || replyId === "customer_support") {
         await sendCustomerSupportMenu(sender);
         userSessions[sender] = { state: "AWAITING_SUPPORT_MESSAGE" };
         return;
       }
 
-      if (replyId === "btn_catalog" || replyId === "btn_browse_games") {
+      if (replyId === "btn_catalog" || replyId === "btn_browse_games" || replyId === "place_order") {
         await sendCatalog(sender);
         return;
       }
     }
 
-    // ── Interactive List Reply (e.g. UPI App Selection) ───────────────────
+    // ── Interactive List Reply (e.g. UPI App Selection, Menu) ─────────────
     if (type === "interactive" && msg.interactive?.type === "list_reply") {
       const listId = msg.interactive.list_reply?.id;
       console.log("📋 List reply clicked:", listId);
+
+      if (listId === "btn_track_order" || listId === "track_order") {
+        const order = await findOrderByIdOrSender(null, sender);
+        if (order) {
+          await sendOrderTrackingCard(sender, order);
+        } else {
+          await sendText(
+            sender,
+            `📦 *Track Your Order*\n\n` +
+            `Please reply with your *Order ID* (e.g. *PH-B2C-XXXXX*) or registered 10-digit mobile number, and we'll pull up your details! 🔎\n\n` +
+            `📞 Support: +91 6364936004`
+          );
+          userSessions[sender] = { state: "AWAITING_TRACKING_QUERY" };
+        }
+        return;
+      }
+
+      if (listId === "btn_support" || listId === "btn_talk_agent" || listId === "customer_support") {
+        await sendCustomerSupportMenu(sender);
+        userSessions[sender] = { state: "AWAITING_SUPPORT_MESSAGE" };
+        return;
+      }
+
+      if (listId === "btn_catalog" || listId === "btn_browse_games" || listId === "place_order") {
+        await sendCatalog(sender);
+        return;
+      }
 
       if (listId?.startsWith("pay_app_")) {
         const appChoice = listId.replace("pay_app_", ""); // "gpay", "phonepe", "paytm", "upi"
@@ -1629,7 +1658,9 @@ app.post("/webhook", async (req, res) => {
         lower.includes("return") ||
         lower.includes("damaged") ||
         lower.includes("broken") ||
-        lower.includes("wrong item");
+        lower.includes("wrong item") ||
+        lower.includes("issue") ||
+        lower.includes("problem");
 
       if (isSupportKeyword) {
         console.log(`🎧 Support keyword detected from ${sender}: "${bodyText}"`);
@@ -1648,6 +1679,8 @@ app.post("/webhook", async (req, res) => {
         lower.includes("tracking") ||
         lower.includes("dispatch") ||
         lower.includes("delivery date") ||
+        lower.includes("my order") ||
+        lower.includes("check order") ||
         userSessions[sender]?.state === "AWAITING_TRACKING_QUERY";
 
       if (isOrderIdDirect || isTrackKeyword) {
