@@ -11,15 +11,102 @@ const SupportTicket = require("./models/SupportTicket");
 const app = express();
 app.use(express.json());
 
-// ─── MongoDB Atlas Database Connection ───────────────────────────────────────
+// ─── MongoDB Atlas Database Connection & Local Orders Resilience ─────────────
 const MONGODB_URI =
   process.env.MONGODB_URI ||
   "mongodb+srv://r26742387_db_user:JNqJipcxT7FbIXRw@cluster0.rytjyvn.mongodb.net/playhaus?retryWrites=true&w=majority&appName=Cluster0";
 
-mongoose
-  .connect(MONGODB_URI)
-  .then(() => console.log("🍃 Connected to MongoDB Atlas (Database: playhaus)"))
-  .catch((err) => console.error("❌ MongoDB Atlas connection error:", err.message));
+// Disable buffering so queries don't hang if Atlas connection is blocked
+mongoose.set("bufferCommands", false);
+
+// ─── Local Orders Storage (Disk persistence fallback) ────────────────────────
+const DATA_DIR    = path.join(__dirname, "data");
+const ORDERS_FILE = path.join(DATA_DIR, "orders.json");
+if (!fs.existsSync(DATA_DIR)) {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (_) {}
+}
+
+function loadLocalOrders() {
+  try {
+    if (fs.existsSync(ORDERS_FILE)) {
+      return JSON.parse(fs.readFileSync(ORDERS_FILE, "utf8")) || {};
+    }
+  } catch (err) {
+    console.error("⚠️ Error reading local orders file:", err.message);
+  }
+  return {};
+}
+
+function saveLocalOrder(order) {
+  if (!order || !order.orderId) return;
+  try {
+    const orders = loadLocalOrders();
+    orders[order.orderId] = {
+      ...orders[order.orderId],
+      ...order,
+      updatedAt: new Date().toISOString(),
+      createdAt: orders[order.orderId]?.createdAt || new Date().toISOString(),
+    };
+    fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2), "utf8");
+    console.log(`💾 Order #${order.orderId} saved to persistent local storage.`);
+  } catch (err) {
+    console.error("⚠️ Error saving local order:", err.message);
+  }
+}
+
+// Auto-sync all local orders to MongoDB Atlas once connection is allowed
+async function syncLocalOrdersToAtlas() {
+  if (mongoose.connection.readyState !== 1) return;
+  const localOrders = loadLocalOrders();
+  const orderList = Object.values(localOrders);
+  if (!orderList.length) return;
+
+  console.log(`🔄 Syncing ${orderList.length} orders from local storage to MongoDB Atlas...`);
+  let synced = 0;
+  for (const o of orderList) {
+    try {
+      await Order.findOneAndUpdate(
+        { orderId: o.orderId },
+        { $set: o },
+        { upsert: true, returnDocument: "after" }
+      );
+      synced++;
+    } catch (_) {}
+  }
+  console.log(`🎉 Auto-synced ${synced}/${orderList.length} orders to MongoDB Atlas!`);
+}
+
+// Connect to Atlas with auto-retry
+let isConnectingMongo = false;
+function connectMongo() {
+  if (mongoose.connection.readyState === 1 || isConnectingMongo) return;
+  isConnectingMongo = true;
+  mongoose
+    .connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 5000,
+    })
+    .then(() => {
+      isConnectingMongo = false;
+      console.log("🍃 Connected to MongoDB Atlas (Database: playhaus)");
+      syncLocalOrdersToAtlas();
+    })
+    .catch((err) => {
+      isConnectingMongo = false;
+      console.error("❌ MongoDB Atlas connection error:", err.message);
+      if (err.message.includes("alert internal error") || err.name === "MongooseServerSelectionError") {
+        console.warn("⚠️ NOTICE: MongoDB Atlas is blocking incoming connections! Add 0.0.0.0/0 to Atlas Network Access.");
+      }
+    });
+}
+
+connectMongo();
+
+// Retry connection every 15 seconds if disconnected
+setInterval(() => {
+  if (mongoose.connection.readyState !== 1) {
+    connectMongo();
+  }
+}, 15000);
 
 // ─── Serve uploaded banners publicly (ngrok tunnels port 3000) ───────────────
 app.use("/uploads", express.static(path.join(__dirname, "admin", "uploads")));
@@ -37,104 +124,175 @@ const userSessions  = {};
 async function syncOrderToDb(sender, order) {
   if (!order || !order.orderId) return;
   userOrders[sender] = order;
+
+  // 1. Immediately persist to disk storage (100% durable & fast)
+  saveLocalOrder(order);
+
+  // 2. Keep UserSession active
   try {
-    const orderDoc = {
-      orderId: order.orderId,
-      sender,
-      customerName: order.customerName || "Customer",
-      items: order.items || [],
-      itemsTotal: Number(order.itemsTotal || 1),
-      deliveryFee: Number(order.deliveryFee || 0),
-      totalPayable: Number(order.totalPayable || 1),
-      expectedDelivery: order.expectedDelivery || "",
-      buyerNote: order.buyerNote || "",
-      paymentMethod: order.paymentMethod || null,
-      isPaid: Boolean(order.isPaid),
-      paidAt: order.paidAt ? new Date(order.paidAt) : null,
-      location: order.location || null,
-      step: order.step || "AWAITING_PAYMENT",
-      trackingNumber: order.trackingNumber || "",
-      courier: order.courier || "BlueDart / Delhivery",
-      trackingUrl: order.trackingUrl || "",
-      statusUpdate: order.statusUpdate || "",
-    };
-
-    const saved = await Order.findOneAndUpdate(
-      { orderId: order.orderId },
-      { $set: orderDoc },
-      { upsert: true, returnDocument: "after" }
-    );
-    console.log(`💾 Order ${order.orderId} synced to MongoDB Atlas.`);
-
-    // Keep UserSession active
-    try {
+    if (mongoose.connection.readyState === 1) {
       await UserSession.findOneAndUpdate(
         { phone: sender },
         { $set: { activeOrderId: order.orderId, lastActiveAt: new Date() } },
         { upsert: true }
       );
-    } catch (_) {}
+    }
+  } catch (_) {}
 
-    return saved;
-  } catch (err) {
-    console.error(`⚠️ Error syncing order ${order.orderId} to MongoDB:`, err.message);
+  // 3. If MongoDB Atlas is connected, sync immediately
+  if (mongoose.connection.readyState === 1) {
+    try {
+      const orderDoc = {
+        orderId: order.orderId,
+        sender,
+        customerName: order.customerName || "Customer",
+        items: order.items || [],
+        itemsTotal: Number(order.itemsTotal || 1),
+        deliveryFee: Number(order.deliveryFee || 0),
+        totalPayable: Number(order.totalPayable || 1),
+        expectedDelivery: order.expectedDelivery || "",
+        buyerNote: order.buyerNote || "",
+        paymentMethod: order.paymentMethod || null,
+        isPaid: Boolean(order.isPaid),
+        paidAt: order.paidAt ? new Date(order.paidAt) : null,
+        location: order.location || null,
+        step: order.step || "AWAITING_PAYMENT",
+        trackingNumber: order.trackingNumber || "",
+        courier: order.courier || "BlueDart / Delhivery",
+        trackingUrl: order.trackingUrl || "",
+        statusUpdate: order.statusUpdate || "",
+      };
+
+      const saved = await Order.findOneAndUpdate(
+        { orderId: order.orderId },
+        { $set: orderDoc },
+        { upsert: true, returnDocument: "after" }
+      );
+      console.log(`💾 Order ${order.orderId} synced to MongoDB Atlas.`);
+      return saved;
+    } catch (err) {
+      console.error(`⚠️ Error syncing order ${order.orderId} to MongoDB:`, err.message);
+    }
+  } else {
+    console.log(`💾 Order ${order.orderId} saved to local storage (pending Atlas sync once 0.0.0.0/0 is whitelisted).`);
   }
 }
 
 async function getActiveOrder(sender) {
   if (userOrders[sender]) return userOrders[sender];
-  try {
-    const doc = await Order.findOne({ sender }).sort({ createdAt: -1 });
-    if (doc) {
-      const orderObj = doc.toObject();
-      userOrders[sender] = orderObj;
-      return orderObj;
+
+  // Try MongoDB Atlas if connected
+  if (mongoose.connection.readyState === 1) {
+    try {
+      const doc = await Order.findOne({ sender }).sort({ createdAt: -1 });
+      if (doc) {
+        const orderObj = doc.toObject();
+        userOrders[sender] = orderObj;
+        return orderObj;
+      }
+    } catch (err) {
+      console.error("⚠️ Error retrieving order from MongoDB:", err.message);
     }
-  } catch (err) {
-    console.error("⚠️ Error retrieving order from MongoDB:", err.message);
   }
+
+  // Fallback to local persistent storage
+  const local = loadLocalOrders();
+  const matching = Object.values(local)
+    .filter((o) => o.sender === sender)
+    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+
+  if (matching.length > 0) {
+    userOrders[sender] = matching[0];
+    return matching[0];
+  }
+
   return null;
 }
 
 // ─── Database Order Search for Tracking (Exact ID, Regex, or Phone) ───────────
 async function findOrderByIdOrSender(queryText, sender) {
-  try {
-    if (queryText) {
-      const clean = String(queryText).trim().replace(/^#/, "");
+  // 1. Try MongoDB Atlas if connected
+  if (mongoose.connection.readyState === 1) {
+    try {
+      if (queryText) {
+        const clean = String(queryText).trim().replace(/^#/, "");
 
-      // 1. Direct exact orderId match
-      let order = await Order.findOne({ orderId: clean });
-      if (order) return order.toObject();
-
-      // 2. Case-insensitive exact match
-      order = await Order.findOne({ orderId: new RegExp(`^${clean}$`, "i") });
-      if (order) return order.toObject();
-
-      // 3. Match Order ID pattern (e.g. PH-B2C-XXXX or part of it)
-      const match = clean.match(/(?:PH-B2C-|PH-)?([A-Z0-9]{4,10})/i);
-      if (match) {
-        order = await Order.findOne({ orderId: new RegExp(match[0], "i") });
+        // 1. Direct exact orderId match
+        let order = await Order.findOne({ orderId: clean });
         if (order) return order.toObject();
-        order = await Order.findOne({ orderId: new RegExp(match[1], "i") });
+
+        // 2. Case-insensitive exact match
+        order = await Order.findOne({ orderId: new RegExp(`^${clean}$`, "i") });
         if (order) return order.toObject();
+
+        // 3. Match Order ID pattern (e.g. PH-B2C-XXXX or part of it)
+        const match = clean.match(/(?:PH-B2C-|PH-)?([A-Z0-9]{4,10})/i);
+        if (match) {
+          order = await Order.findOne({ orderId: new RegExp(match[0], "i") });
+          if (order) return order.toObject();
+          order = await Order.findOne({ orderId: new RegExp(match[1], "i") });
+          if (order) return order.toObject();
+        }
+
+        // 4. Match 10+ digit mobile number
+        const digits = clean.replace(/\D/g, "");
+        if (digits.length >= 10) {
+          order = await Order.findOne({ sender: new RegExp(digits.slice(-10)) }).sort({ createdAt: -1 });
+          if (order) return order.toObject();
+        }
       }
 
-      // 4. Match 10+ digit mobile number
-      const digits = clean.replace(/\D/g, "");
-      if (digits.length >= 10) {
-        order = await Order.findOne({ sender: new RegExp(digits.slice(-10)) }).sort({ createdAt: -1 });
+      // 5. Look up latest order for current sender WhatsApp number
+      if (sender) {
+        const order = await Order.findOne({ sender }).sort({ createdAt: -1 });
         if (order) return order.toObject();
       }
+    } catch (err) {
+      console.error("⚠️ Error finding order in MongoDB:", err.message);
     }
-
-    // 5. Look up latest order for current sender WhatsApp number
-    if (sender) {
-      const order = await Order.findOne({ sender }).sort({ createdAt: -1 });
-      if (order) return order.toObject();
-    }
-  } catch (err) {
-    console.error("⚠️ Error finding order in MongoDB:", err.message);
   }
+
+  // 2. Fallback to Local Persistent Storage & In-Memory Cache
+  const localOrders = { ...loadLocalOrders() };
+  if (userOrders[sender]) {
+    localOrders[userOrders[sender].orderId] = userOrders[sender];
+  }
+
+  const allOrders = Object.values(localOrders);
+
+  if (queryText) {
+    const clean = String(queryText).trim().replace(/^#/, "");
+    const cleanUpper = clean.toUpperCase();
+
+    // Exact match
+    const exact = allOrders.find((o) => (o.orderId || "").toUpperCase() === cleanUpper);
+    if (exact) return exact;
+
+    // Substring / code match
+    const match = clean.match(/(?:PH-B2C-|PH-)?([A-Z0-9]{4,10})/i);
+    if (match) {
+      const code = match[1].toUpperCase();
+      const partial = allOrders.find((o) => (o.orderId || "").toUpperCase().includes(code));
+      if (partial) return partial;
+    }
+
+    // Phone digits match
+    const digits = clean.replace(/\D/g, "");
+    if (digits.length >= 10) {
+      const phoneMatch = allOrders
+        .filter((o) => (o.sender || "").includes(digits.slice(-10)))
+        .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      if (phoneMatch.length > 0) return phoneMatch[0];
+    }
+  }
+
+  if (sender) {
+    const senderOrders = allOrders
+      .filter((o) => o.sender === sender)
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    if (senderOrders.length > 0) return senderOrders[0];
+  }
+
   return null;
 }
 
@@ -2239,24 +2397,36 @@ app.all("/api/payment/simulate/:orderId", async (req, res) => {
   res.status(404).json({ error: "Order not found" });
 });
 
-// ─── API to View Persisted Orders from MongoDB ────────────────────────────────
+// ─── API to View Persisted Orders from MongoDB / Local Storage ──────────────
 app.get("/api/orders", async (req, res) => {
   try {
-    const orders = await Order.find().sort({ createdAt: -1 }).limit(100);
-    res.json({ count: orders.length, orders });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    if (mongoose.connection.readyState === 1) {
+      const orders = await Order.find().sort({ createdAt: -1 }).limit(100);
+      return res.json({
+        count: orders.length,
+        source: "MongoDB Atlas",
+        status: "connected",
+        orders,
+      });
+    }
+  } catch (_) {}
+
+  const local = Object.values(loadLocalOrders()).sort(
+    (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+  );
+  res.json({
+    count: local.length,
+    source: "Local Storage (pending Atlas 0.0.0.0/0 whitelist)",
+    status: "atlas_disconnected",
+    orders: local,
+  });
 });
 
 app.get("/api/orders/:orderId", async (req, res) => {
-  try {
-    const order = await Order.findOne({ orderId: req.params.orderId });
-    if (!order) return res.status(404).json({ error: "Order not found" });
-    res.json(order);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  const { orderId } = req.params;
+  const order = await findOrderByIdOrSender(orderId, null);
+  if (!order) return res.status(404).json({ error: "Order not found" });
+  res.json(order);
 });
 
 // ─── API to Update Order Status (Admin / Logistics) ───────────────────────────
@@ -2488,14 +2658,21 @@ app.get("/track/:orderId", async (req, res) => {
 
 // ─── Bot Health & Integration Status ──────────────────────────────────────────
 app.get("/api/status", (req, res) => {
+  const isConnected = mongoose.connection.readyState === 1;
+  const localOrdersCount = Object.keys(loadLocalOrders()).length;
+
   res.json({
     status: "healthy",
     uptime: process.uptime(),
     database: {
       type: "MongoDB Atlas",
-      connected: mongoose.connection.readyState === 1,
+      connected: isConnected,
       database: mongoose.connection.name || "playhaus",
       cluster: "cluster0.rytjyvn.mongodb.net",
+      localOrdersSaved: localOrdersCount,
+      whitelistStatus: isConnected
+        ? "0.0.0.0/0 is whitelisted and active ✅"
+        : "⚠️ ATLAS IS BLOCKING CONNECTIONS: Please add 0.0.0.0/0 in MongoDB Atlas Network Access!",
     },
     webhook: {
       url: "https://playhaus.onrender.com/webhook",
