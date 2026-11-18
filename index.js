@@ -488,39 +488,48 @@ async function sendWelcomeWithFlow(to) {
     console.log(`✅ Welcome flow sent! Message ID: ${res.data?.messages?.[0]?.id}`);
   } catch (err) {
     console.error(`❌ sendWelcomeWithFlow FAILED:`, JSON.stringify(err?.response?.data || err.message, null, 2));
-    if (header.type === "image") {
-      try {
-        console.log("ℹ️ Retrying welcome flow with text header fallback...");
-        await axios.post(
-          GRAPH_API_URL,
-          {
-            messaging_product: "whatsapp",
-            recipient_type: "individual",
-            to,
-            type: "interactive",
-            interactive: {
-              type:   "flow",
-              header: { type: "text", text: "🎮 Playhaus" },
-              body:   { text: fullBody },
-              footer: { text: cfg.flowFooterText || "Kheloge Toh Khiloge ✨" },
-              action: {
-                name: "flow",
-                parameters: {
-                  flow_message_version: "3",
-                  flow_token:           `flow-${to}-${Date.now()}`,
-                  flow_id:              FLOW_ID,
-                  flow_cta:             cfg.flowCtaText || "Choose a Service",
-                  flow_action:          "navigate",
-                },
-              },
+    // Graceful fallback to Interactive Buttons Menu
+    try {
+      console.log("ℹ️ Falling back to Interactive Buttons Menu...");
+      await axios.post(
+        GRAPH_API_URL,
+        {
+          messaging_product: "whatsapp",
+          recipient_type: "individual",
+          to,
+          type: "interactive",
+          interactive: {
+            type: "button",
+            header: {
+              type: "text",
+              text: "🎮 Welcome to Playhaus!"
             },
-          },
-          { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
-        );
-        return;
-      } catch (_) {}
+            body: {
+              text:
+                `${cfg.welcomeMessage || "Welcome to *PlayHaus: Kheloge Toh Khiloge* 🎉"}\n\n` +
+                `All sample games are ₹1.00 with Free Delivery.\n` +
+                `Select an option below to continue:`
+            },
+            footer: {
+              text: cfg.flowFooterText || "Playhaus: Kheloge Toh Khiloge ✨"
+            },
+            action: {
+              buttons: [
+                { type: "reply", reply: { id: "btn_place_order", title: "🛍️ Place Order" } },
+                { type: "reply", reply: { id: "btn_track_order", title: "📦 Track Order" } },
+                { type: "reply", reply: { id: "btn_support", title: "🎧 Customer Support" } }
+              ]
+            }
+          }
+        },
+        { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+      );
+      console.log(`✅ Fallback interactive buttons sent to ${to}!`);
+      return;
+    } catch (btnErr) {
+      console.error("❌ Fallback buttons also failed:", btnErr.message);
+      await sendText(to, `${fullBody}\n\nReply with *Order* to view games or *Track* to track an order.`);
     }
-    throw err;
   }
 }
 
@@ -1604,7 +1613,7 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      if (replyId === "btn_catalog" || replyId === "btn_browse_games" || replyId === "place_order") {
+      if (replyId === "btn_place_order" || replyId === "btn_catalog" || replyId === "btn_browse_games" || replyId === "place_order") {
         await sendCatalog(sender);
         return;
       }
